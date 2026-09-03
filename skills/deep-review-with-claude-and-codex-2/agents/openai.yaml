@@ -1,0 +1,7 @@
+interface:
+  display_name: "Deep Review 2"
+  short_description: "重要度と今回の取扱いを分ける二重AIレビュー"
+  default_prompt: "Use $deep-review-with-claude-and-codex-2 to review this fixed PR with independent Claude and Codex reviewers."
+
+policy:
+  allow_implicit_invocation: false
