@@ -303,12 +303,13 @@ Codexホストはexecが継続中sessionを返したら同じsessionを終了ま
 
 [references/review-quality-contract.md](references/review-quality-contract.md)を、レビュー観点、重要度、
 finding根拠、今回の取扱い、修正案の評価の単一の正典として使う。finding段はcoverageを優先し、
-後段でファクト・実害・proportionalityを検証する。真にクリーンな場合は`NO_FINDINGS`を受理する。
+後段で現実的な成立経路、起こりやすさ、既存対策・復旧後に残る影響を検証し、採否と重要度を裁定する。
+根拠不足の棄却・撤回と、成立済みの問題に残る追加確認を区別する。真にクリーンな場合は`NO_FINDINGS`を受理する。
 
 ## 完了条件
 
 - 固定したSHA/digestと全reviewer出力の世代が一致している。
-- Critical/High/Medium/Lowの最終集合が実コードでファクトチェック済みである。
+- Critical/High/Medium/Lowの最終集合が実コードと品質契約の採用基準でファクトチェック済みであり、棄却・撤回の根拠も監査に残っている。
 - 各最終findingについて、重要度とは独立した今回の取扱い、根拠、目的との関係、
   既存成功記録・既存判断との照合が記録されている。
 - ユーザー判断が必要な項目には、ユーザーへ確認する具体的な問いと、各選択で何が変わるかがある。

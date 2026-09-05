@@ -296,11 +296,37 @@ function normalizeDialogueLayout(source) {
   if (seen.size !== displayFindings.size)
     fail("dialogue cross-check omits findings");
   const indexContent = body("Medium以上の指摘一覧");
+  const separateHeading = "### 別Issue候補（Medium以上）";
+  const separateStart = indexContent.indexOf(separateHeading);
   const decisionStart = indexContent.indexOf("### ユーザーへの確認事項");
-  const indexRows = table(
-    decisionStart < 0 ? indexContent : indexContent.slice(0, decisionStart),
-    "| ID | 一言でいうと | 取扱い | 状態 |"
-  );
+  const indexHeadings = indexContent.filter((line) => line.startsWith("### "));
+  if (
+    !isDeepStrictEqual(indexHeadings, [
+      separateHeading,
+      ...(decisionStart < 0 ? [] : ["### ユーザーへの確認事項"]),
+    ])
+  ) fail("dialogue finding index partitions are missing, duplicated or out of order");
+  const indexTable = (content) => {
+    const header = "| ID | 一言でいうと | 取扱い | 状態 |";
+    const rows = content.some((line) => line.trim() === header)
+      ? table(content, header)
+      : [];
+    if (rows.length === 0 && !content.includes("> 該当なし"))
+      fail("empty dialogue finding index partition requires an explicit marker");
+    if (
+      rows.length === 0 &&
+      tableDataRows(content).some((line) => line.trim() !== header)
+    )
+      fail("dialogue finding index partition has an invalid table");
+    return rows;
+  };
+  const indexPartitions = [
+    indexTable(indexContent.slice(0, separateStart)),
+    indexTable(indexContent.slice(
+      separateStart + 1,
+      decisionStart < 0 ? undefined : decisionStart
+    )),
+  ];
   const indexed = new Set();
   const states = new Set([
     "未確認",
@@ -310,23 +336,26 @@ function normalizeDialogueLayout(source) {
     "対応済み・push済み",
     "—",
   ]);
-  for (const row of indexRows) {
-    const finding = displayFindings.get(row[0]);
-    if (
-      row.length !== 4 ||
-      !finding ||
-      finding.severity === "Low" ||
-      indexed.has(row[0]) ||
-      row[1] !== normalizeMarkdownValue(finding.title) ||
-      row[2] !== finding.handling ||
-      !states.has(row[3]) ||
-      row[3] !== fieldValue(finding.block, "状態")
-    ) {
-      fail("dialogue finding index does not match the finding details");
+  for (const [partition, indexRows] of indexPartitions.entries()) {
+    for (const row of indexRows) {
+      const finding = displayFindings.get(row[0]);
+      if (
+        row.length !== 4 ||
+        !finding ||
+        finding.severity === "Low" ||
+        indexed.has(row[0]) ||
+        row[1] !== normalizeMarkdownValue(finding.title) ||
+        row[2] !== finding.handling ||
+        (finding.handling === HANDLING_LABELS["separate-issue"]) !== (partition === 1) ||
+        !states.has(row[3]) ||
+        row[3] !== fieldValue(finding.block, "状態")
+      ) {
+        fail("dialogue finding index does not match the finding details");
+      }
+      if (!["未確認", "—"].includes(row[3]))
+        fieldValue(finding.block, "状態の根拠");
+      indexed.add(row[0]);
     }
-    if (!["未確認", "—"].includes(row[3]))
-      fieldValue(finding.block, "状態の根拠");
-    indexed.add(row[0]);
   }
   if (
     indexed.size !==
@@ -360,7 +389,7 @@ function normalizeDialogueLayout(source) {
   );
   const overviewRows = table(
     body("重要度別の集計"),
-    "| 重要度 | 検出数 | 判断済 |"
+    "| 重要度 | 検出数 | 判断済 | 本PRの最終指摘 | 別Issue候補 |"
   );
   const excluded = body("指摘として採用しなかった候補").map((line) =>
     line
@@ -411,6 +440,7 @@ function normalizeDialogueLayout(source) {
     roundSeverityRows,
     displayFindings,
     crossRows,
+    indexPartitions,
   };
 }
 
@@ -419,11 +449,34 @@ function validateDialogueAccounting(
   findings,
   exclusions,
   primary,
-  rounds
+  rounds,
+  finalFindingSet,
+  reportTreatments
 ) {
   if (!layout.overviewRows) return;
   if (layout.overviewRows.length !== 4)
     fail("dialogue overview requires all four severities");
+  const finalFindings = finalFindingSet?.final.findings ?? findings;
+  const separateIds = new Set(
+    finalFindingSet
+      ? finalFindingSet.decisions
+        .filter((decision) => decision.handling === "separate-issue")
+        .map((decision) => decision.findingId)
+      : [...reportTreatments]
+        .filter(([, treatment]) => treatment.handling === HANDLING_LABELS["separate-issue"])
+        .map(([id]) => id)
+  );
+  const partitions = [false, true].map((separate) =>
+    finalFindings.filter((finding) => separateIds.has(finding.id) === separate)
+  );
+  partitions.forEach((partition, index) => {
+    const expectedIds = partition.filter((finding) => finding.severity !== "Low")
+      .map((finding) => finding.id).sort();
+    const actualIds = layout.indexPartitions[index]
+      .map((row) => layout.displayFindings.get(row[0]).id).sort();
+    if (!isDeepStrictEqual(actualIds, expectedIds))
+      fail("dialogue finding index partition differs from final findings");
+  });
   SEVERITIES.forEach((severity, index) => {
     const excluded = exclusions.filter(
       (finding) => finding.severity === severity
@@ -435,6 +488,9 @@ function validateDialogueAccounting(
       severity,
       String(count),
       severity === "Low" ? "—" : String(excluded),
+      ...partitions.map((partition) => String(
+        partition.filter((finding) => finding.severity === severity).length
+      )),
     ];
     if (!isDeepStrictEqual(layout.overviewRows[index], expected))
       fail(`dialogue overview count mismatch: ${severity}`);
@@ -2396,6 +2452,8 @@ export function validateReviewReport(reportPath, options = {}) {
     excludedCandidateSections.phase5Rows,
     primaryAdjudication,
     adjudications,
+    finalFindingSet,
+    reportTreatments,
   );
   validatePrComments(
     lines,
