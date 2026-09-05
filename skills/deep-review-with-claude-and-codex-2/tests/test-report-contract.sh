@@ -545,7 +545,7 @@ const root=process.argv[2];
 const good=readFileSync(`${root}/dialogue-valid.md`,'utf8');
 writeFileSync(`${root}/dialogue-verification.md`,dialogueFixture(
   readFileSync(`${root}/verification-no-request.md`,'utf8')
-    .replace('- 既存判断との照合: 初出','- 既存判断との照合: 初出\n- 必要な追加確認: 外部サービスの履歴は権限不足で未取得。履歴を照合し、同じ更新が重複していなければこの指摘を取り下げる。'))
+    .replace('- 既存判断との照合: 初出','- 既存判断との照合: 初出\n- 必要な追加確認: 更新が重複する経路はコードで確認済み。外部サービスの履歴は権限不足で未取得のため、履歴を照合して影響件数・範囲と対応優先度を確定する。'))
   .replace('- 必要な追加確認:', '- 未確認の内容・理由と判断への影響:'));
 writeFileSync(`${root}/dialogue-user-decision-code-id.md`,
   readFileSync(`${root}/dialogue-user-decision-markdown.md`,'utf8')
@@ -577,6 +577,85 @@ expect_pass "$T/dialogue-user-decision-code-id.md" "code-formatted display IDs p
 expect_pass "$T/dialogue-verification.md" "plain unverified-point label preserves the verification request"
 for fixture in wrong-overview invented-decision wrong-index missing-index wrong-model wrong-total missing-primary missing-round duplicate-round duplicate-section missing-evidence missing-canonical-id invented-state; do
   expect_fail "$T/dialogue-$fixture.md" "dialogue rejects $fixture"
+done
+
+echo "== RC06: final findings are partitioned without dropping audit evidence =="
+node --input-type=module - "$T" "$TEST_DIR/report-dialogue-fixture.mjs" "$SKILL_DIR/scripts/review-adjudication.mjs" "$VALIDATOR" <<'NODE'
+import assert from 'node:assert/strict';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const [root, fixturePath, adjudicationPath, validatorPath] = process.argv.slice(2);
+const { dialogueFixture } = await import(pathToFileURL(fixturePath));
+const { findingSetSha256 } = await import(pathToFileURL(adjudicationPath));
+const { validateReviewReport } = await import(pathToFileURL(validatorPath));
+let legacy = readFileSync(`${root}/user-decision.md`, 'utf8');
+const title = 'retryで処理が重複する';
+const block = legacy.match(/^#### M1\.[\s\S]*?(?=^### Low)/mu)[0].trim();
+const separateBlock = (displayId, id, severity) => block
+  .replace(`#### M1. [F1] ${title}`, `#### ${displayId}. [${id}] ${title}`)
+  .replace('- 今回の取扱い: `ユーザー判断が必要`', '- 今回の取扱い: `別Issue候補`')
+  .replace(/^- (?:ユーザーへの確認事項|選択による影響):.*\n/gmu, '')
+  .replace('→ 最終 `Medium`', `→ 最終 \`${severity}\``);
+legacy = legacy
+  .replace('### Medium (1件)', '### Medium (2件)')
+  .replace(block, `${block}\n\n${separateBlock('M2', 'F2', 'Medium')}`)
+  .replace('### Low (0件)\n\n> 該当なし', `### Low (1件)\n\n${separateBlock('L1', 'F3', 'Low')}`)
+  .replace('| Medium | 1 | 明確な支障 |', '| Medium | 2 | 明確な支障 |')
+  .replace('| Low | 0 | 軽微・改善提案 |', '| Low | 1 | 軽微・改善提案 |')
+  .replace('| F1 | Medium | High | Medium | ユーザー判断が必要 | 到達条件限定 |',
+    '| F1 | Medium | High | Medium | ユーザー判断が必要 | 到達条件限定 |\n' +
+    '| F2 | Medium | High | Medium | 別Issue候補 | 到達条件限定 |\n' +
+    '| F3 | Medium | High | Low | 別Issue候補 | 到達条件限定 |')
+  .replace('- 別Issue候補: `0件`', '- 別Issue候補: `2件`')
+  .replace('| 別Issue候補 | 0 |', '| 別Issue候補 | 2 |')
+  .replace(/^- 件数集計:.*$/mu, '- 件数集計: Phase4=3, 除外=0, 継続=3, 最終=3')
+  .replace(/^- 件数式:.*$/mu, '- 件数式: 3 = 0 + 3、3 = 3')
+  .replace(/^- 判定内訳:.*$/mu, '- 判定内訳: addressed=0, dismissed-valid=0, dismissed-but-rechallenge=0, not-judged=3');
+const finalFindings = [
+  { id: 'F1', severity: 'Medium', title },
+  { id: 'F2', severity: 'Medium', title },
+  { id: 'F3', severity: 'Low', title },
+];
+const digest = findingSetSha256(finalFindings);
+legacy = legacy.replace(/^- final finding-set digest:.*$/mu, `- final finding-set digest: ${digest}`);
+const good = dialogueFixture(legacy);
+writeFileSync(`${root}/dialogue-partitioned.md`, good);
+const result = validateReviewReport(`${root}/dialogue-partitioned.md`);
+assert.equal(result.total, 3);
+assert.deepEqual(result.counts, { Critical: 0, High: 0, Medium: 2, Low: 1 });
+assert.equal(result.handlingCounts['別Issue候補'], 2);
+assert.ok(good.includes('| Medium | 2 | 0 | 1 | 1 |'));
+assert.ok(good.includes('| Low | 1 | — | 0 | 1 |'));
+assert.ok(good.includes(`- final finding-set digest: ${digest}`));
+assert.ok(good.includes('| M1 | 外部サービス仕様の確認をこのPRへ含めるか |'));
+const separateRow = `| M2 | ${title} | 別Issue候補 | 未確認 |`;
+const mainRow = `| M1 | ${title} | ユーザー判断が必要 | 未確認 |`;
+const separateSection = /### 別Issue候補（Medium以上）\n[\s\S]*?(?=### ユーザーへの確認事項)/u;
+const cases = {
+  'partition-forged-main-count': good.replace('| Medium | 2 | 0 | 1 | 1 |', '| Medium | 2 | 0 | 2 | 1 |'),
+  'partition-swapped-counts': good.replace('| Medium | 2 | 0 | 1 | 1 |', '| Medium | 2 | 0 | 2 | 0 |'),
+  'partition-forged-separate-count': good.replace('| Medium | 2 | 0 | 1 | 1 |', '| Medium | 2 | 0 | 1 | 2 |'),
+  'partition-forged-low-count': good.replace('| Low | 1 | — | 0 | 1 |', '| Low | 1 | — | 0 | 2 |'),
+  'partition-missing-low-count': good.replace('| Low | 1 | — | 0 | 1 |', '| Low | 1 | — | 0 | 0 |'),
+  'partition-missing-separate-section': good.replace(separateSection, ''),
+  'partition-empty-separate': good.replace(separateRow, '> 該当なし'),
+  'partition-separate-in-main': good.replace(separateRow, '> 該当なし').replace(mainRow, `${mainRow}\n${separateRow}`),
+  'partition-main-in-separate': good.replace(mainRow, '> 該当なし').replace(separateRow, `${separateRow}\n${mainRow}`),
+  'partition-missing-cross-check': good.replace(/^\| L1 \|.*\| Low \|$/mu, ''),
+  'partition-main-only-digest': good.replace(digest, findingSetSha256(finalFindings.slice(0, 1))),
+};
+for (const [name, text] of Object.entries(cases)) writeFileSync(`${root}/${name}.md`, text);
+const zero = readFileSync(`${root}/dialogue-valid.md`, 'utf8');
+writeFileSync(`${root}/partition-missing-empty-section.md`, zero.replace(/### 別Issue候補（Medium以上）\n[\s\S]*?(?=## レビューの前提と範囲)/u, ''));
+NODE
+check_partition_rc=$?
+if [ "$check_partition_rc" = "0" ]; then
+  ok "mixed severity partitions preserve Low, user decisions and the complete final digest"
+else
+  ng "mixed severity partition fixture and audit assertions"
+fi
+for fixture in forged-main-count swapped-counts forged-separate-count forged-low-count missing-low-count missing-separate-section empty-separate separate-in-main main-in-separate missing-cross-check main-only-digest missing-empty-section; do
+  expect_fail "$T/partition-$fixture.md" "dialogue rejects partition $fixture"
 done
 
 printf 'RESULT: pass=%s fail=%s\n' "$pass" "$fail"

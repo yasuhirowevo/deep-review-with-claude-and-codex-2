@@ -2150,6 +2150,107 @@ NODE
   cp "$T/dialogue-legacy.md" "$dialogue_artifact/report.md"
 done
 
+echo "== R07c: separate-issue partitions use final findings and preserve full audit digests =="
+for partition_artifact in "$identity_artifact" "$excluded_artifact"; do
+  partition_target=$(jq -r .targetSlug "$partition_artifact/context.json")
+  partition_run_id=$(jq -r .reviewRunId "$partition_artifact/context.json")
+  cp "$partition_artifact/report.md" "$T/partition-legacy.md"
+  cp "$partition_artifact/phase5/final-findings.json" "$T/partition-final-original.json"
+  jq '{decisions: [.decisions[] | {
+    findingId, outcome: (if .outcome == "addressed" then "dismissed-valid" else .outcome end),
+    handling: "separate-issue", handlingRationale, evidence, rationale
+  }]}' "$T/partition-final-original.json" > "$T/partition-final-draft.json"
+  rm "$partition_artifact/phase5/final-findings.json"
+  node "$FINAL_FINDINGS" --context "$partition_artifact/context.json" \
+    --adjudication "$partition_artifact/phase4/round-2/adjudication.json" \
+    --pr-review-context "$partition_artifact/phase5/pr-review-context.json" \
+    --draft "$T/partition-final-draft.json" \
+    --output "$partition_artifact/phase5/final-findings.json" >/dev/null
+  check "$?" "0" "separate-issue fixture uses the canonical finalizer for $partition_target"
+  node --input-type=module - "$SCRIPTS/report-dialogue-fixture.mjs" "$T" "$partition_artifact" <<'NODE'
+import assert from 'node:assert/strict';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const [fixturePath, root, artifact] = process.argv.slice(2);
+const { dialogueFixture } = await import(pathToFileURL(fixturePath));
+const original = JSON.parse(readFileSync(`${root}/partition-final-original.json`, 'utf8'));
+const current = JSON.parse(readFileSync(`${artifact}/phase5/final-findings.json`, 'utf8'));
+assert.equal(current.final.sha256, original.final.sha256);
+assert.notEqual(current.handling.sha256, original.handling.sha256);
+const retained = current.final.findings.length === 1;
+const previousHandling = retained ? 'このPRでの対応候補' : '対応済み';
+let legacy = readFileSync(`${root}/partition-legacy.md`, 'utf8')
+  .replace(`- ${previousHandling}: 1件`, `- ${previousHandling}: 0件`)
+  .replace('- 別Issue候補: 0件', '- 別Issue候補: 1件')
+  .replace(`| ${previousHandling} | 1 |`, `| ${previousHandling} | 0 |`)
+  .replace('| 別Issue候補 | 0 |', '| 別Issue候補 | 1 |')
+  .replace(`- 今回の取扱い: \`${previousHandling}\``, '- 今回の取扱い: `別Issue候補`')
+  .replace(/^(\| (?:F1|X1) \|.*)$/mu, row => row.replace(`| ${previousHandling} |`, '| 別Issue候補 |'))
+  .replace(original.handling.sha256, current.handling.sha256);
+if (!retained) legacy = legacy.replace('addressed=1, dismissed-valid=0', 'addressed=0, dismissed-valid=1');
+const report = dialogueFixture(legacy, artifact);
+writeFileSync(`${artifact}/report.md`, report);
+writeFileSync(`${root}/partition-good.md`, report);
+assert.ok(report.includes(retained ? '| Medium | 1 | 0 | 0 | 1 |' : '| Medium | 1 | 1 | 0 | 0 |'));
+assert.ok(report.includes(`- final finding-set digest: ${original.final.sha256}`));
+assert.ok(report.includes(`- handling digest: ${current.handling.sha256}`));
+assert.ok(report.includes('| 別Issue候補 | 1 |'));
+if (retained) {
+  assert.ok(report.includes('### M1 — `retained()` finding'));
+  assert.ok(report.includes('| M1 | `retained()` finding | Medium | Medium | Medium |'));
+} else {
+  assert.ok(report.includes('| X1 | F1 | `retained()` finding | Medium | 別Issue候補 |'));
+}
+const mutations = {
+  'main-count': report.replace(/^(\| Medium \| \d+ \| \d+ \| )0( \| \d+ \|)$/mu,
+    (_row, prefix, suffix) => `${prefix}1${suffix}`),
+  'separate-count': report.replace(/^(\| Medium \| \d+ \| \d+ \| \d+ \| )(\d+)( \|)$/mu,
+    (_row, prefix, number, suffix) => `${prefix}${Number(number) + 1}${suffix}`),
+  'missing-separate': report.replace(/### 別Issue候補（Medium以上）\n[\s\S]*?(?=## レビューの前提と範囲)/u, ''),
+  'handling-digest': report.replace(current.handling.sha256, original.handling.sha256),
+};
+if (retained) {
+  const row = '| M1 | `retained()` finding | 別Issue候補 | 未確認 |';
+  assert.ok(report.includes(row));
+  mutations.promote = report.replace(row, '> 該当なし').replace('> 該当なし', row);
+  mutations['canonical-handling'] = dialogueFixture(readFileSync(`${root}/partition-legacy.md`, 'utf8'), artifact)
+    .replace(original.handling.sha256, current.handling.sha256);
+}
+for (const [name, value] of Object.entries(mutations)) {
+  assert.notEqual(value, report, `mutation ${name} must change the fixture`);
+  writeFileSync(`${root}/partition-${name}.md`, value);
+}
+NODE
+  check "$?" "0" "separate-issue report preserves canonical final and handling evidence for $partition_target"
+  node "$PUBLISHER" --tooling-root "$T/tooling" \
+    --target "$partition_target" --run-id "$partition_run_id" --mode full \
+    --report-path "$partition_artifact/report.md" >"$T/partition-publish.out" 2>"$T/partition-publish.err"
+  partition_rc=$?
+  check "$partition_rc" "0" "publication accepts final-only separate-issue accounting for $partition_target"
+  if [ "$partition_rc" != "0" ]; then sed -n '1,12p' "$T/partition-publish.err"; fi
+  partition_mutations="main-count separate-count missing-separate handling-digest"
+  if [ "$partition_artifact" = "$identity_artifact" ]; then
+    partition_mutations="$partition_mutations promote canonical-handling"
+  fi
+  for partition_mutation in $partition_mutations; do
+    cp "$T/partition-$partition_mutation.md" "$partition_artifact/report.md"
+    node "$PUBLISHER" --tooling-root "$T/tooling" \
+      --target "$partition_target" --run-id "$partition_run_id" --mode full \
+      --report-path "$partition_artifact/report.md" >/dev/null 2>"$T/partition-reject.err"
+    check "$?" "1" "publication rejects $partition_mutation for $partition_target"
+    if [ "$partition_mutation" = "canonical-handling" ]; then
+      if rg -q 'report handling does not match the final finding artifact' "$T/partition-reject.err"; then
+        ok "a self-consistent promotion is rejected against canonical handling"
+      else
+        ng "a self-consistent promotion is rejected against canonical handling"
+        sed -n '1,12p' "$T/partition-reject.err"
+      fi
+    fi
+  done
+  cp "$T/partition-legacy.md" "$partition_artifact/report.md"
+  cp "$T/partition-final-original.json" "$partition_artifact/phase5/final-findings.json"
+done
+
 echo "== R08: caller-supplied report aliases cannot bypass symlink rejection =="
 ln -s "$artifact_b/report.md" "$T/caller-report-link.md"
 node "$PUBLISHER" --tooling-root "$T/tooling" \

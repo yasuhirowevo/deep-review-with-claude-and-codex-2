@@ -85,6 +85,7 @@ export function dialogueFixture(legacy, artifact) {
   }
   const groups = [];
   const indexRows = [];
+  const separateRows = [];
   const crossRows = [];
   const ids = new Map();
   severities.forEach((severity) => {
@@ -108,7 +109,7 @@ export function dialogueFixture(legacy, artifact) {
         block += `\n  - モデル別重要度: ${verdict}\n  - 最終重要度の理由: ${row[5]}\n`;
         if (severity !== "Low") {
           block = `- 状態: 未確認\n${block}`;
-          indexRows.push(
+          (row[4] === "別Issue候補" ? separateRows : indexRows).push(
             `| ${displayId} | ${mdCell(title)} | ${row[4]} | 未確認 |`
           );
         }
@@ -129,10 +130,11 @@ export function dialogueFixture(legacy, artifact) {
     .map(splitCells);
   const overview = severities.map((severity) => {
     const existing = cross.filter((row) => row[3] === severity).length;
+    const separate = cross.filter((row) => row[3] === severity && row[4] === "別Issue候補").length;
     const removed = excludedRows.filter((row) => row[3] === severity).length;
     return `| ${severity} | ${existing + removed} | ${
       severity === "Low" ? "—" : removed
-    } |`;
+    } | ${existing - separate} | ${separate} |`;
   });
   let decisions = section(legacy, "ユーザーへの確認事項", 3);
   if (decisions === "> 該当なし") decisions = "";
@@ -151,11 +153,14 @@ export function dialogueFixture(legacy, artifact) {
       "## 結論",
       conclusion,
       "## 重要度別の集計",
-      "| 重要度 | 検出数 | 判断済 |\n|---|---:|---:|\n" + overview.join("\n"),
+      "| 重要度 | 検出数 | 判断済 | 本PRの最終指摘 | 別Issue候補 |\n|---|---:|---:|---:|---:|\n" + overview.join("\n"),
       "検出数は除外前の指摘数。判断済はコメントで対応済み・受容済みを確認した件数。",
       "## Medium以上の指摘一覧",
       "| ID | 一言でいうと | 取扱い | 状態 |\n|---|---|---|---|\n" +
-        indexRows.join("\n"),
+        (indexRows.join("\n") || "> 該当なし"),
+      "### 別Issue候補（Medium以上）",
+      "| ID | 一言でいうと | 取扱い | 状態 |\n|---|---|---|---|\n" +
+        (separateRows.join("\n") || "> 該当なし"),
       decisions,
       "## レビューの前提と範囲",
       section(legacy, "レビューの前提と範囲"),
