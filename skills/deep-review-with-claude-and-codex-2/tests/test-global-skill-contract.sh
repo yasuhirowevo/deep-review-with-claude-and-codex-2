@@ -71,7 +71,7 @@ require_text "$SKILL_DIR/CONSTITUTION.md" \
   "constitution preserves the separation between importance and handling"
 require_text "$SKILL_DIR/agents/openai.yaml" \
   "allow_implicit_invocation: false" \
-  "the comparison skill is explicit-only while the old version remains installed"
+  "the skill is explicit-only"
 require_text "$SKILL_DIR/SKILL.md" "外部Claude＋外部Codex" \
   "both hosts use the same two external model families"
 require_text "$SKILL_DIR/SKILL.md" "ホスト内Agentをreviewerにしない" \

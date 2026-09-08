@@ -374,7 +374,7 @@ function buildPrompt(
     resultContract === "review"
       ? "- 通常レビューの各findingは `High: ...`、`[High] ...`、`H1. ...`、重要度見出し＋実内容、または `Severity` 列と `Finding` 列を持つMarkdown表のいずれかで出力してください（重要度はCritical/High/Medium/Low）。0件の場合は `NO_FINDINGS`、非空の `scope: ...`、非空の `reason: ...` を出力してください。"
       : "- Phase 3の追加事実確認として、質問への非空回答を出力してください。通常レビューや収束レビューの代用にはしません。",
-    "- 受領証とDIFF_PROBEの次行以降には、従来どおりレビュー本文だけを出力してください。受領証とDIFF_PROBEはレビュー観点・重要度・品質基準を変更しません。",
+    "- 受領証とDIFF_PROBEの次行以降には、レビュー本文だけを出力してください。受領証とDIFF_PROBEはレビュー観点・重要度・品質基準を変更しません。",
   ].join("\n");
 
   return rendered.replace(

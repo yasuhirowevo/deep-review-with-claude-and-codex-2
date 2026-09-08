@@ -4,9 +4,9 @@ description: |
   Claude CodeまたはCodexのどちらからでも、外部Claude Code CLIと外部Codex CLIによる
   異種モデルのディープレビューを実行する。PRまたはコミット済みbranchを固定SHA・安全なdiff・
   read-only snapshotでレビューし、入力attestation、クロスチェック、最大20ラウンドのfresh収束確認、
-  PRコメント照合、重要度と今回の取扱いを分離した人間向けレポート出力まで行う改良版。
+  PRコメント照合、重要度と今回の取扱いを分離した人間向けレポート出力まで行う。
   "$deep-review-with-claude-and-codex-2"または"deep-review-with-claude-and-codex-2"と
-  明示された依頼で使用する。旧版との比較運用中は暗黙起動しない。
+  明示された依頼で使用する。
   親レビュー工程から独立したleaf reviewerとして渡された依頼では再帰起動せず、
   指定された差分と実ファイルを直接レビューする。
 argument-hint: "<PR番号 or PR URL | --branch <ref> [--base <ref>]>"
@@ -285,7 +285,7 @@ Codexホストはexecが継続中sessionを返したら同じsessionを終了ま
 - 各モデルの初回起動ごとにretryまたはfinalize-only resumeは最大1回。
 - managed runnerのexit 3は、外側sandboxがreviewerの起動を阻止した実行基盤エラーである。
   成功済みreviewerを保持し、exit 3のreviewerはresume IDなしのfresh retryとして次attemptで再実行する。
-  同時に失敗中のreviewerが複数なら、従来どおり1回の`--reviewer both`へまとめる。
+  同時に失敗中のreviewerが複数なら、1回の`--reviewer both`へまとめる。
   Codexホストでは次attemptのexecを`sandbox_permissions="require_escalated"`で直接発行し、
   チャットで外部送信承認を質問しない。
 - timeoutした同じphase/round・同じreviewerの直前失敗attempt出力からsession/thread IDを

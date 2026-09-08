@@ -140,7 +140,7 @@ Claude runnerの既存の`Codex sandbox detected`も同じexit 3契約である�
 
 - 成功済みreviewerを保持し、exit 3のreviewerだけをresume IDなしのfresh retryとして次attemptで再実行する。
 - 同時に失敗中のreviewerが複数なら、既存契約どおり1回の`--reviewer both`へまとめる。
-  exit 3のreviewerにはresume IDを渡さず、通常失敗側は従来のresume条件を維持する。
+  exit 3のreviewerにはresume IDを渡さず、通常失敗側は本書の「retryとresume」の条件に従う。
 - Codexホストでは、次attemptのmanaged runnerを`sandbox_permissions="require_escalated"`で直接発行する。
   チャットの外部送信承認へ分岐しない。
 - 実行プラットフォームがsandbox外実行を拒否した場合は迂回せず、その拒否を実行基盤エラーとして報告する。

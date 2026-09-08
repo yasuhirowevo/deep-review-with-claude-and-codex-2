@@ -3,7 +3,7 @@
 #
 # Do not call this script directly from Claude Code. Use one of the fixed-mode
 # review entrypoints instead:
-#   .claude/skills/deep-review-with-claude-and-codex/scripts/run-codex.sh
+#   run-codex.sh (in this directory)
 #
 # Usage:
 #   run-codex-core.sh read-only <stdout|file> \
