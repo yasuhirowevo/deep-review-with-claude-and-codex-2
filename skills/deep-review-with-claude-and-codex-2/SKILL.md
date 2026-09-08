@@ -139,6 +139,9 @@ Codex DesktopやClaude Codeなどshell初期化ファイルを継承しないホ
 対象差分、PR本文、対象HEADファイルを意味解釈する前に、
 このSKILL.mdの物理ディレクトリにあるinstalled runnerを1回だけ起動する。
 
+Codexホストでは、preflightのGitHub APIアクセスと`git fetch`に必要な通信を行うため、
+installed runnerを起動するexecを初回から`sandbox_permissions="require_escalated"`で発行する。
+
 ```bash
 INSTALLED_SKILL_DIR="<このSKILL.mdの物理ディレクトリ>"
 PROJECT_ROOT="<対象Gitリポジトリ>"
@@ -202,8 +205,8 @@ contextの`reviewerLauncherPath`に固定されたinstalled launcherから初回
 Codexのexec command先頭にはcontextから読んだlauncherのcanonical絶対pathをリテラルで置く。
 shell変数、`~`、command substitution経由でlauncherを指定せず、固定prefix ruleへ確実に一致させる。
 チャットで承認を質問したり、sandbox内の失敗attemptを先に作ったりしない。
-外側の権限昇格は外部reviewerを起動するmanaged runnerのexecだけに使い、leaf Codexのread-only sandboxと
-leaf Claudeのsafe modeは変更しない。実行プラットフォームが権限昇格を拒否した場合だけ、
+外側の権限昇格はtrusted preflightと外部reviewerを起動するmanaged runnerのexecだけに使い、
+leaf Codexのread-only sandboxとleaf Claudeのsafe modeは変更しない。実行プラットフォームが権限昇格を拒否した場合だけ、
 外部送信の承認不足へ読み替えず、実行基盤の拒否として報告する。
 
 ```bash
