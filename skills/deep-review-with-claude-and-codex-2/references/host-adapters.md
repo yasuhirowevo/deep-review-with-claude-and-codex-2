@@ -23,7 +23,7 @@ retry、resume、follow-up、Phase 4のhost契約へ進む。
 
 Codexホストでは、trusted preflight、外部reviewerを起動するmanaged pair / wave runnerと単独follow-up runnerのexecを、
 初回から`sandbox_permissions="require_escalated"`で発行する。sandbox内で一度失敗させてから判断しない。
-これはGitHub取得、外部CLIの通信とユーザー領域のCLI状態へのアクセスを可能にするホスト実行権限であり、
+これはGitHubからのPR情報やコミットの取得、外部CLIの通信、ユーザー領域のCLI状態へのアクセスを可能にするホスト実行権限であり、
 reviewerへ渡す入力を増やさない。leaf Codexのread-only sandbox、leaf Claudeのsafe mode、固定prompt、
 対象worktreeの非変更契約はそのまま維持する。
 
