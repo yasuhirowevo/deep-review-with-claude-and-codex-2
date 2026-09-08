@@ -21,9 +21,9 @@ retry、resume、follow-up、Phase 4のhost契約へ進む。
 
 ## Codexホストの外側sandbox契約
 
-Codexホストでは、外部reviewerを起動するmanaged pair / wave runnerと単独follow-up runnerのexecを、
+Codexホストでは、trusted preflight、外部reviewerを起動するmanaged pair / wave runnerと単独follow-up runnerのexecを、
 初回から`sandbox_permissions="require_escalated"`で発行する。sandbox内で一度失敗させてから判断しない。
-これは外部CLIの通信とユーザー領域のCLI状態へのアクセスを可能にするホスト実行権限であり、
+これはGitHub取得、外部CLIの通信とユーザー領域のCLI状態へのアクセスを可能にするホスト実行権限であり、
 reviewerへ渡す入力を増やさない。leaf Codexのread-only sandbox、leaf Claudeのsafe mode、固定prompt、
 対象worktreeの非変更契約はそのまま維持する。
 
@@ -31,7 +31,7 @@ PRまたはbranchを指定した本スキルの明示起動が標準レビュー
 このexecを発行する前にチャットで外部送信承認を質問しない。プラットフォームの権限昇格リクエストを
 直接発行し、プラットフォームが拒否した場合だけ実行基盤の拒否として報告する。
 
-Codexホストの外側execは、contextの`reviewerLauncherPath`にあるinstalled
+Codexホストで外部reviewerを起動するexecは、contextの`reviewerLauncherPath`にあるinstalled
 `launch-run-reviewer.sh`から始める。launcherは`pair`、`wave`、`claude-followup`の正規形だけを受理し、
 context、run namespace、prompt、出力path、runner引数、tooling digestを検証してrun固有runnerへ委譲する。
 この固定pathだけをCodexのallow ruleへ登録し、run固有temp path一般や任意shellを許可しない。
