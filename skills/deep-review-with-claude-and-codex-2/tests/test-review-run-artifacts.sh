@@ -1722,9 +1722,9 @@ else
 fi
 if [ ! -e "$T/tooling/_tmp/reviews/deep-review-42.md" ] &&
   [ ! -e "$T/tooling/_tmp/reviews/pr-42.md" ]; then
-  ok "versioned publication does not create or overwrite old-version aliases"
+  ok "publication uses only the specified report alias paths"
 else
-  ng "versioned publication does not create or overwrite old-version aliases"
+  ng "publication uses only the specified report alias paths"
 fi
 
 excluded_context=$(DEEP_REVIEW_TEMP_ROOT="$T/temp" bash "$INITIALIZER" \

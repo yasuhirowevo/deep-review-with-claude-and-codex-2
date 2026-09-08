@@ -420,7 +420,7 @@ node <skillDir>/scripts/build-review-prompt.mjs \
 ```
 
 4promptのmanifestが固定された後、`run-review-wave.sh`をwave supervisor専用の
-`timeout: 2400000`で起動する。各pairと別processで行うretry/resumeは従来どおり`timeout: 1050000`とする。
+`timeout: 2400000`で起動する。各pairと別processで行うretry/resumeは`timeout: 1050000`とする。
 wave runnerは`N`と`N+1`を同じrunへ原子的に予約し、各roundでClaude/Codexをpair起動する。
 `N`は通常の`phase4/round-<N>/`、`N+1`は
 `phase4/waves/wave-<N>-<N+1>/speculative-round-<N+1>/`へ分離する。
@@ -430,7 +430,7 @@ Windowsではwave固有artifactとpromotion/execution receiptの絶対pathをGit
 Nodeのfilesystem境界でだけnative pathへ変換する。
 supervisor PIDはMSYS/Cygwin環境では`/proc/<pid>/winpid`からnative PIDを取得して固定し、
 Win32 Nodeによる生存確認とPID名前空間を一致させる。
-空の`phase4/waves/`は従来の逐次実行を妨げない。最初の逐次attemptまたはwave予約は共通の
+空の`phase4/waves/`は逐次実行を妨げない。最初の逐次attemptまたはwave予約は共通の
 `phase4/execution-mode.json`を原子的にclaimし、同じrunでの逐次artifactとwave artifactの混在を
 起動前にfail-closedで拒否する。逐次実行は収束gateを通過してからmodeをclaimし、wave予約は
 完成済みstatusをstaging directoryからrenameして公開する。wave state lockは完成済みのPID・nonce
@@ -740,9 +740,8 @@ receiptで固定した最終snapshotへ再結合し、
 初期snapshotへのfallbackや最終判断後のcomment編集は拒否する。
 `not-checked`でfindingを除外したreportは拒否する。
 不整合または旧schemaのartifactを公開せず、新しいrunで再レビューする。
-固定名`_tmp/reviews/deep-review-2-<targetSlug>.md`は改良版の人向け直近コピー、
-PRモードの`_tmp/reviews/pr-<N>-v2.md`は改良版のPR別直近コピーである。
-旧版の直近コピーを上書きしないため、旧版と改良版のレポートを比較できる。
+固定名`_tmp/reviews/deep-review-2-<targetSlug>.md`は人向け直近コピー、
+PRモードの`_tmp/reviews/pr-<N>-v2.md`はPR別直近コピーである。
 どちらも同時実行中の別runを追跡する用途には使わない。branchモードはrefを可読化したprefixと
 元refのSHA-256先頭12文字を組み合わせた
 `_tmp/reviews/deep-review-2-branch-<readableRef>-<digest12>.md`だけを使い、PR互換名を作らない。

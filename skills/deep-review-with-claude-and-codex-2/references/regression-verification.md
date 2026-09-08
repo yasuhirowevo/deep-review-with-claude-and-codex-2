@@ -54,10 +54,9 @@ fake Claude/Codex CLIと一時Gitリポジトリを使い、外部ネットワ�
 - レポートが目的・対象・非対象・前回からの前提変更を日本語で明示すること
 - round別の新規・重複・撤回・降格・昇格・据置と最終集合安定による収束契約
 - PRコメント4情報源とretry / resume / 失敗を含む実行証跡
-- 改良版の`pr-<N>-v2.md`とbranchの衝突しない`deep-review-2-*`が
-  旧版の人向け直近コピーを上書きしないこと
+- 人向け直近コピーを`pr-<N>-v2.md`とbranchのref同士が衝突しない`deep-review-2-*`へ出力すること
 - review-only toolingにworkspace-write入口が同梱されないこと
-- 正典global / repository経路を維持し、削除済みのグローバル旧名入口を復活しないこと
+- 正典global / repository経路を維持すること
 
 ## 実モデルsmoke
 
