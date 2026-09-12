@@ -119,7 +119,7 @@ run固有の`<reviewArtifactDir>/report.md`へ、以下の構造で単体利用�
 - **監査**
   - 正典ID: F1
   - 正典題名: <final-findings.jsonの題名をそのまま記載>
-  - モデル別重要度: Claude `<重要度|未検出>` / Codex `<重要度|未検出>` → 最終 `Medium`
+  - モデル別重要度: Claude `<重要度|未検出|未選択>` / Codex `<重要度|未検出|未選択>` → 最終 `Medium`
   - 検出: `<Claude | Codex | 両方>`
   - 最終重要度の理由: <各モデルの判定を採用・訂正した理由>
   - 出典: <該当する正典round、候補、採否記録への参照>
@@ -157,6 +157,7 @@ run固有の`<reviewArtifactDir>/report.md`へ、以下の構造で単体利用�
 
 各モデルの重要度は、正典の採否記録で同じ指摘に結び付いた候補のうち、そのモデルの直近の判定です。
 「未検出」は成功した出力に該当候補がなかったことを指し、未実行とは区別します。
+設定で無効にしたreviewerは「未選択」と記載します。
 
 ### ラウンド別集計
 
@@ -231,7 +232,7 @@ run固有の`<reviewArtifactDir>/report.md`へ、以下の構造で単体利用�
 - BASE guidance digest: `<sha256>`
 - final finding-set digest: `<sha256>`
 - handling digest: `<sha256>`
-- 初回review: Claude `<成功|失敗|未起動>` / Codex `<成功|失敗|未起動>`
+- 初回review: Claude `<成功|失敗|未起動|未選択>` / Codex `<成功|失敗|未起動|未選択>`
 - retry / resume / 失敗: `<status.jsonから導出した値>`
 - run固有report: `<絶対パス>`
 ```
@@ -265,9 +266,9 @@ run固有の`<reviewArtifactDir>/report.md`へ、以下の構造で単体利用�
 - round表のClaude新規から最終集合変化までは各roundの`adjudication.json`から転記し、
   全候補の判定記録から導出された値と一致させる。
 - `final finding-set digest`はfinal集合digest、`handling digest`は全Phase 5 decisionのhandling digestと一致させる。
-- Phase 2と全roundはretry/resume後の正典結果がClaude/Codexとも成功していなければならない。
-  片方または両方が失敗したままのrunは完成reportを作らず、未完了としてユーザーへ報告する。
-- `収束`と記載する場合、round表の末尾2行は両モデルとも成功、新規0件、撤回・降格・昇格0件、
+- Phase 2と全roundはretry/resume後の正典結果が選択した全reviewerで成功していなければならない。
+  選択したreviewerが失敗したままのrunは完成reportを作らず、未完了としてユーザーへ報告する。
+- `収束`と記載する場合、round表の末尾2行は選択した全reviewerで成功、新規0件、撤回・降格・昇格0件、
   最終集合変化なしにする。
 - `未収束`と記載する完成reportは、上限の20roundを全て記載する。
 - 1〜19roundで収束条件を満たしていないrunは完成reportとして公開しない。
@@ -296,6 +297,7 @@ Lowも今回の取扱い、取扱いの根拠、目的との関係、既存判�
 
 ## 表示と集計の補足
 
+- 単独reviewでも既存のClaude/Codex列を維持する。無効側のモデル別重要度、round状態、実行証跡のreviewer行と初回状態は「未選択」、重要度別候補数と新規件数は「—」とする。選択は固定contextと一致させ、無効側を成功や検出0件として集計しない。
 - Medium以上の一覧は、本PRの表と`### 別Issue候補（Medium以上）`の表に分け、最終集合の全Critical / High / Mediumを1件ずつ載せる。別Issue候補だけを後者へ置き、ID・題名・取扱い・状態を保持する。各区分が0件なら「> 該当なし」を残し、別Issue候補の小見出しを省略しない。
 - 詳細4重要度、クロスチェック、監査の取扱い件数・件数式・digestは、別Issue候補も含めた全件を保持する。
 - 見出し・一覧・クロスチェックの人間向けIDと表示題名は揃え、正典IDとは一対一に対応させる。正典IDと正典題名は監査欄から照合する。

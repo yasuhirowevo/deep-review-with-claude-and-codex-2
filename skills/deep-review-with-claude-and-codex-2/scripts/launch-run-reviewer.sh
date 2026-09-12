@@ -53,13 +53,13 @@ SNAPSHOT_SKILL_DIR=$(printf '%s' "$VERIFIED_CONTEXT" | jq -er .skillDir)
 TOOLING_DIGEST=$(printf '%s' "$VERIFIED_CONTEXT" | jq -er .toolingDigest)
 RUNNER_PATH=$(printf '%s' "$VERIFIED_CONTEXT" | jq -er .runnerPath)
 CLAUDE_REVIEW_MODEL=$(printf '%s' "$VERIFIED_CONTEXT" | \
-  jq -er .reviewerConfig.claude.model)
+  jq -r '.reviewerConfig.claude.model // empty')
 CLAUDE_REVIEW_EFFORT=$(printf '%s' "$VERIFIED_CONTEXT" | \
-  jq -er .reviewerConfig.claude.effort)
+  jq -r '.reviewerConfig.claude.effort // empty')
 CODEX_REVIEW_MODEL=$(printf '%s' "$VERIFIED_CONTEXT" | \
-  jq -er .reviewerConfig.codex.model)
+  jq -r '.reviewerConfig.codex.model // empty')
 CODEX_REVIEW_REASONING_EFFORT=$(printf '%s' "$VERIFIED_CONTEXT" | \
-  jq -er .reviewerConfig.codex.reasoningEffort)
+  jq -r '.reviewerConfig.codex.reasoningEffort // empty')
 
 node "$SCRIPT_DIR/snapshot-tooling.mjs" --verify \
   --snapshot "$SNAPSHOT_SKILL_DIR" \

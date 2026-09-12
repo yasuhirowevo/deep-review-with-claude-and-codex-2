@@ -8,7 +8,7 @@
 #
 # Usage:
 #   run-codex.sh \
-#     --project <project_dir> --temp-root <path> \
+#     --context <context_json> --project <project_dir> --temp-root <path> \
 #     --prompt-template <path> --diff <path> --snapshot <path> \
 #     --run-id <id> --target <pr:N|branch:name> --head-sha <sha> \
 #     --diff-sha256 <sha256> --snapshot-metadata-sha256 <sha256> \
@@ -43,22 +43,12 @@ CORE_SCRIPT="$SCRIPT_DIR/run-codex-core.sh"
 PREPARER="$SCRIPT_DIR/prepare-codex-review-input.mjs"
 VERIFIER="$SCRIPT_DIR/verify-codex-review-output.mjs"
 
-if [ -z "${CODEX_REVIEW_MODEL:-}" ]; then
-  echo "ERROR: CODEX_REVIEW_MODEL is not configured" >&2
-  exit 2
-fi
-if [ -z "${CODEX_REVIEW_REASONING_EFFORT:-}" ]; then
-  echo "ERROR: CODEX_REVIEW_REASONING_EFFORT is not configured" >&2
-  exit 2
-fi
-
-export CODEX_MODEL="$CODEX_REVIEW_MODEL"
-export CODEX_REASONING_EFFORT="$CODEX_REVIEW_REASONING_EFFORT"
 export CODEX_TIMEOUT_MAX=1500
 # 900s + the default 30s TERM-to-KILL grace and output verification stay below
 # the workflow's 1050s outer execution timeout.
 export CODEX_TIMEOUT="${CODEX_TIMEOUT:-900}"
 
+CONTEXT_PATH=""
 PROJECT_DIR=""
 TEMP_ROOT=""
 PROMPT_TEMPLATE=""
@@ -78,6 +68,7 @@ usage() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --context) CONTEXT_PATH="${2:-}"; shift 2 ;;
     --project) PROJECT_DIR="${2:-}"; shift 2 ;;
     --temp-root) TEMP_ROOT="${2:-}"; shift 2 ;;
     --prompt-template) PROMPT_TEMPLATE="${2:-}"; shift 2 ;;
@@ -103,7 +94,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 for required in \
-  "$PROJECT_DIR" "$TEMP_ROOT" "$PROMPT_TEMPLATE" "$DIFF_FILE" \
+  "$CONTEXT_PATH" "$PROJECT_DIR" "$TEMP_ROOT" "$PROMPT_TEMPLATE" "$DIFF_FILE" \
   "$SNAPSHOT_DIR" "$RUN_ID" "$TARGET" "$HEAD_SHA" "$DIFF_SHA256" \
   "$SNAPSHOT_METADATA_SHA256" "$RESULT_CONTRACT"; do
   if [ -z "$required" ]; then
@@ -112,6 +103,23 @@ for required in \
     exit 2
   fi
 done
+
+if [ ! -f "$CONTEXT_PATH" ] || [ -L "$CONTEXT_PATH" ]; then
+  echo "ERROR: context must be a regular non-symlink file: $CONTEXT_PATH" >&2
+  exit 2
+fi
+if ! node "$SCRIPT_DIR/reviewer-selection.mjs" --context "$CONTEXT_PATH" --reviewer codex >/dev/null; then
+  exit 2
+fi
+CODEX_MODEL=$(jq -er '.reviewerConfig.codex.model | select(type == "string" and length > 0)' "$CONTEXT_PATH") || {
+  echo "ERROR: CODEX_REVIEW_MODEL is not configured in the prepared context" >&2
+  exit 2
+}
+CODEX_REASONING_EFFORT=$(jq -er '.reviewerConfig.codex.reasoningEffort | select(type == "string" and length > 0)' "$CONTEXT_PATH") || {
+  echo "ERROR: CODEX_REVIEW_REASONING_EFFORT is not configured in the prepared context" >&2
+  exit 2
+}
+export CODEX_MODEL CODEX_REASONING_EFFORT
 
 TEMP_ROOT=$(cd "$TEMP_ROOT" 2>/dev/null && pwd -P) || {
   echo "ERROR: Codex review temporary root is unavailable" >&2

@@ -4,6 +4,7 @@
 # shellcheck disable=SC2016
 
 set -uo pipefail
+unset CLAUDE_REVIEW_ENABLED CODEX_REVIEW_ENABLED
 
 SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPTS/.." && pwd)"
@@ -507,6 +508,23 @@ if [ -e "$UNSAFE_STALE_DIR" ]; then
 else
   ng "stale input with mismatched ownership is preserved"
 fi
+
+echo "== A01b: direct Claude review and follow-up reject a disabled reviewer =="
+original_context_path="$CONTEXT_PATH"
+jq '.reviewerConfig.claude.enabled = false | .reviewerConfig.codex.enabled = true' \
+  "$CONTEXT_PATH" > "$T/disabled-claude-context.json"
+CONTEXT_PATH="$T/disabled-claude-context.json"
+for contract in review followup; do
+  rm -f "$FAKE_ARGS_FILE"
+  out=$(CLAUDE_REVIEW_ENABLED=true run_attested success "$contract" "disabled-$contract" 2>"$T/a01b-$contract.err"); rc=$?
+  check "$rc" "2" "disabled Claude $contract is rejected"
+  contains "$(cat "$T/a01b-$contract.err")" "claude reviewer is disabled" "disabled Claude $contract selection is reported"
+  [ ! -e "$FAKE_ARGS_FILE" ] && ok "disabled Claude $contract is rejected before CLI start" || ng "disabled Claude $contract is rejected before CLI start"
+done
+CONTEXT_PATH="$original_context_path"
+out=$(CLAUDE_REVIEW_ENABLED=false CODEX_REVIEW_ENABLED=false \
+  run_attested success review frozen-enabled-claude 2>"$T/a01b-frozen.err"); rc=$?
+check "$rc" "0" "Claude review preserves context selection after ambient flags change"
 
 echo "== A02: missing, stale, empty, and malformed clean results fail closed =="
 for mode in \

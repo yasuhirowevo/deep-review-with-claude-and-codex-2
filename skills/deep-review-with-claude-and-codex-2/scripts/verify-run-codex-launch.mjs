@@ -9,6 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { toNativeAbsolutePath } from "./path-interop.mjs";
+import { assertReviewerEnabled, validateReviewerConfiguration } from "./reviewer-selection.mjs";
 
 const REQUIRED_RUNNER_OPTIONS = new Set([
   "--project",
@@ -63,68 +64,6 @@ function requiredString(object, key) {
     fail(`context.${key} must be a nonempty string`);
   }
   return value;
-}
-
-function requiredReviewerConfig(context) {
-  const reviewerConfig = context.reviewerConfig;
-  if (
-    !reviewerConfig ||
-    typeof reviewerConfig !== "object" ||
-    Array.isArray(reviewerConfig)
-  ) {
-    fail("context.reviewerConfig must be an object");
-  }
-  const claude = reviewerConfig.claude;
-  const codex = reviewerConfig.codex;
-  if (!claude || typeof claude !== "object" || Array.isArray(claude)) {
-    fail("context.reviewerConfig.claude must be an object");
-  }
-  if (!codex || typeof codex !== "object" || Array.isArray(codex)) {
-    fail("context.reviewerConfig.codex must be an object");
-  }
-  return {
-    claude: {
-      model: requiredString(claude, "model"),
-      effort: requiredString(claude, "effort"),
-    },
-    codex: {
-      model: requiredString(codex, "model"),
-      reasoningEffort: requiredString(codex, "reasoningEffort"),
-    },
-  };
-}
-
-function requiredReviewerConfigSources(context) {
-  const sources = context.reviewerConfigSources;
-  if (!sources || typeof sources !== "object" || Array.isArray(sources)) {
-    fail("context.reviewerConfigSources must be an object");
-  }
-  const claude = sources.claude;
-  const codex = sources.codex;
-  if (!claude || typeof claude !== "object" || Array.isArray(claude)) {
-    fail("context.reviewerConfigSources.claude must be an object");
-  }
-  if (!codex || typeof codex !== "object" || Array.isArray(codex)) {
-    fail("context.reviewerConfigSources.codex must be an object");
-  }
-  const allowed = new Set(["environment", "config-file"]);
-  const source = (object, key) => {
-    const value = requiredString(object, key);
-    if (!allowed.has(value)) {
-      fail(`context reviewer config source is invalid: ${value}`);
-    }
-    return value;
-  };
-  return {
-    claude: {
-      model: source(claude, "model"),
-      effort: source(claude, "effort"),
-    },
-    codex: {
-      model: source(codex, "model"),
-      reasoningEffort: source(codex, "reasoningEffort"),
-    },
-  };
 }
 
 function assertPrivateEntry(input, kind, expectedMode, label) {
@@ -287,8 +226,8 @@ try {
     fail("context Codex launcher does not match this installed skill");
   }
   assertInvocation(context, options, runRoot);
-  const reviewerConfig = requiredReviewerConfig(context);
-  const reviewerConfigSources = requiredReviewerConfigSources(context);
+  assertReviewerEnabled(context, "codex");
+  const { reviewerConfig, reviewerConfigSources } = validateReviewerConfiguration(context);
 
   const runnerPath = canonicalExisting(
     path.join(skillDir, "scripts", "run-codex.sh"),

@@ -1,7 +1,7 @@
 # ホストアダプター
 
 Claude/Codexというモデル別review工程を、Claude Code/Codexという実行ホストへ割り当てるSSOT。
-どちらのホストでも同じ2モデル、7観点、受入条件、収束条件を維持する。
+どちらのホストでも設定で選択したreviewerを使い、7観点、受入条件、収束条件を維持する。
 
 ## ホスト判定
 
@@ -11,6 +11,9 @@ Claude/Codexというモデル別review工程を、Claude Code/Codexという実
 - Codex上でskillを実行している: `HOST=codex`
 
 判定できない場合は外部CLIを起動せず、ユーザーに実行ホストを確認する。
+
+レビュー担当は`context.reviewerConfig.<reviewer>.enabled`で固定され、ホスト判定から導出しない。
+無効なreviewerのCLI・認証は不要で、起動対象は`reviewer-selection.mjs --context <CONTEXT>`で取得する。
 
 通常実行の最初の操作は、SKILL.mdの物理ディレクトリにあるinstalled
 `scripts/run-review-preflight.sh`へ現在の会話ランタイムから決めた`HOST`を渡すことである。
@@ -86,20 +89,20 @@ runnerの終了処理より先に打ち切ってはならない。
 | Codex review | read-only外部Codex CLI | read-only外部Codex CLI |
 | Claude review | safe-mode外部Claude Code CLI | safe-mode外部Claude Code CLI |
 
-両promptとsidecar manifestを先に固定し、Codexホストではinstalled reviewer launcher経由、
+選択したreviewerのpromptとsidecar manifestを先に固定し、Codexホストではinstalled reviewer launcher経由、
 Claude Codeホストではrun固有toolingの`run-review-pair.sh`を直接1回起動して、
-外部Claudeと外部Codexをホストによらず同時実行する。pair runnerは各runnerのstdout、stderr、
+選択したreviewerをホストによらず起動し、両方有効なら外部Claudeと外部Codexを同時実行する。pair runnerは各runnerのstdout、stderr、
 終了code、使用promptのpath/digest/割当をattempt単位のrun固有artifactへ保存し、
-両方の終了を待ってから制御を返す。
+選択した全reviewerの終了を待ってから制御を返す。
 片側retry/resumeも同じpair runnerをモデル選択付きで起動し、phaseの`status.json`へ
 全attempt履歴とモデル別の正典attemptを原子的に反映する。
 片方の出力を他方のpromptへ混ぜず、同一の固定入力に対する独立性を維持する。
-両promptには同じthreat modelと[review-quality-contract.md](review-quality-contract.md)全文を埋め込み、
+各promptには同じthreat modelと[review-quality-contract.md](review-quality-contract.md)全文を埋め込み、
 7観点・重要度・修正案契約をホストやreviewer別に変更しない。
 
 ## leaf reviewer共通契約
 
-両promptは次の見出しと境界から開始する。
+各promptは次の見出しと境界から開始する。
 
 ```text
 ## 実行境界（最優先）
@@ -147,7 +150,7 @@ Claude runnerの既存の`Codex sandbox detected`も同じexit 3契約である�
 
 ## 受入検証
 
-両モデルとも次を必須とする。
+選択した全reviewerに次を必須とする。
 
 - session/thread ID
 - 期待する`RUN_ID`
@@ -175,20 +178,21 @@ Claude runnerの既存の`Codex sandbox detected`も同じexit 3契約である�
 - Phase 3のfact確認follow-upは`result-contract=followup`を使う。
 - follow-upはphase3のモデル別artifactへ保存し、reviewの正典attemptを更新しない。
 - reviewの失敗をfollow-up契約で受理しない。
-- 片方または両方がretry/resume後も失敗した場合は、成功側の出力と全attempt証跡を保持したまま
-  未完了として停止する。単独モデルで後続phase/roundへ進まず、完成reportを公開しない。
+- 選択したreviewerがretry/resume後も失敗した場合は、成功側の出力と全attempt証跡を保持したまま
+  未完了として停止する。失敗した担当を選択から外して後続phase/roundへ進まず、完成reportを公開しない。
 - 停止時は失敗モデル、phase/round、attempt、確認できたerror evidence、証拠から判断できる原因と
   具体的な解決手順をユーザーへ示す。原因を確定できない場合は未確定と明記し、解決後に同じ固定HEADを
   新しいrunで再実行するよう案内する。
 
 ## Phase 4の収束
 
-各roundは新規Claude sessionと新規Codex threadを使う。既存findings・PRコメント・他モデル結果を渡さず、
+各roundは選択したreviewerの新規session/threadを使う。既存findings・PRコメント・他モデル結果を渡さず、
 固定SHA・diff・snapshot・BASE guidanceと当該視点だけを渡す。
 
-- `run-review-wave.sh`で、次の正典roundと後続投機roundのClaude/Codex、合計4processを同時起動する。
+- `run-review-wave.sh`で、次の正典roundと後続投機roundの選択reviewerを同時起動する。
+  両方有効なら4process、単独なら2processになる。
 - wave runnerの外側実行枠は`2400000`msとし、leadが失敗した場合は投機pairの終了後も
-  retry/resumeによる正典両成功、または`prior-failure`決定までsessionを維持する。
+  retry/resumeによる選択reviewerの正典全成功、または`prior-failure`決定までsessionを維持する。
 - Codexホストでは継続中のexec sessionを保持し、`WAVE_LEAD_READY`後に別execで裁定とwave制御を行う。
   Claude Codeホストではwave runnerをbackground実行し、同じmarkerの確認後に裁定とwave制御を行う。
 - 後続投機roundはwave固有領域へ保存し、直前roundの裁定が未収束になるまで出力を読まない。
@@ -217,14 +221,14 @@ Claude runnerの既存の`Codex sandbox detected`も同じexit 3契約である�
   起動許可後の取消だけを自分が所有するreviewer groupへ適用する。replacement supervisorは
   旧世代roleの保存PIDへ直接signalせず、pair自身の実測結果確定まで待つ。
 - 片側失敗時は正典化した同じround内で失敗モデルだけをretry/resumeし、
-  `status.json`が選んだ両モデルの正典出力を収束判定に使う。
+  `status.json`が選んだ有効reviewerの正典出力を収束判定に使う。
 
 - オーケストレーターが新規、重複、撤回、降格、昇格、据置、最終集合の変化をroundごとに集計する。
-- 両モデルの実質新規findingが0件で、撤回・降格・昇格がなく、最終集合も変化しないroundだけを
+- 選択した全reviewerの実質新規findingが0件で、撤回・降格・昇格がなく、最終集合も変化しないroundだけを
   安定roundと数える。
 - 連続2安定roundで終了する。
 - 最大20ラウンド。
-- 片方または両方がretry/resume後も失敗したroundでは未完了として停止し、0件roundとして数えず、
+- 選択したreviewerがretry/resume後も失敗したroundでは未完了として停止し、0件roundとして数えず、
   `--action prior-failure`で後続投機roundを中断して停止する。
 
 ## traceability
@@ -235,7 +239,7 @@ Claude runnerの既存の`Codex sandbox detected`も同じexit 3契約である�
 - tooling digest、diff digest、snapshot metadata digest、BASE guidance digest
 - review run IDとrun固有REPORT_PATH
 - オーケストレーター: Claude Code / Codex
-- Claude reviewer: Claude Code CLI
-- Codex reviewer: Codex CLI
+- Claude reviewer: Claude Code CLI / 未選択
+- Codex reviewer: Codex CLI / 未選択
 - 確認できたモデル名と推論設定
 - retry、resume、回復した失敗attemptの有無。完成reportでは最終的な縮退を許可しない

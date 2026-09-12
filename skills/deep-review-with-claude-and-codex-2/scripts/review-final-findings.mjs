@@ -13,7 +13,9 @@ import { pathToFileURL } from "node:url";
 import {
   canonicalFindings,
   findingSetSha256,
+  getAdjudicationReviewers,
 } from "./review-adjudication.mjs";
+import { getEnabledReviewers } from "./reviewer-selection.mjs";
 import {
   PR_CONTEXT_SOURCES,
   derivePrEvidence,
@@ -123,7 +125,8 @@ function validateInputs(
   }
   if (
     adjudication?.schema !== "deep-review-adjudication/v1" ||
-    adjudication.reviewRunId !== context.reviewRunId
+    adjudication.reviewRunId !== context.reviewRunId ||
+    !isDeepStrictEqual(getAdjudicationReviewers(adjudication), getEnabledReviewers(context))
   ) {
     fail("final adjudication identity does not match the review context");
   }

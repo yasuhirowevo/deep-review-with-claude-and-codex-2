@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -uo pipefail
+unset CLAUDE_REVIEW_ENABLED CODEX_REVIEW_ENABLED
 
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 RESOLVER="$(cd -P "$TEST_DIR/../scripts" && pwd -P)/resolve-reviewer-config.sh"
@@ -36,10 +37,11 @@ file_json=$(CLAUDE_REVIEW_MODEL='' CLAUDE_REVIEW_EFFORT='' \
   DEEP_REVIEW_CONFIG_FILE="$config_file" bash "$RESOLVER")
 if printf '%s' "$file_json" | jq -e '
   .reviewerConfig == {
-    claude:{model:"claude-model-from-file",effort:"claude-effort-from-file"},
-    codex:{model:"codex-model-from-file",reasoningEffort:"codex-effort-from-file"}
+    claude:{enabled:true,model:"claude-model-from-file",effort:"claude-effort-from-file"},
+    codex:{enabled:true,model:"codex-model-from-file",reasoningEffort:"codex-effort-from-file"}
   } and
-  ([.reviewerConfigSources[][]] | all(. == "config-file"))
+  ([.reviewerConfigSources[] | .model, (.effort // .reasoningEffort)] | all(. == "config-file")) and
+  ([.reviewerConfigSources[].enabled] | all(. == "default"))
 ' >/dev/null; then
   ok "config file supplies arbitrary reviewer values without shell startup"
 else
@@ -56,10 +58,11 @@ environment_json=$( \
 )
 if printf '%s' "$environment_json" | jq -e '
   .reviewerConfig == {
-    claude:{model:"claude-model-from-environment",effort:"claude-effort-from-environment"},
-    codex:{model:"codex-model-from-environment",reasoningEffort:"codex-effort-from-environment"}
+    claude:{enabled:true,model:"claude-model-from-environment",effort:"claude-effort-from-environment"},
+    codex:{enabled:true,model:"codex-model-from-environment",reasoningEffort:"codex-effort-from-environment"}
   } and
-  ([.reviewerConfigSources[][]] | all(. == "environment"))
+  ([.reviewerConfigSources[] | .model, (.effort // .reasoningEffort)] | all(. == "environment")) and
+  ([.reviewerConfigSources[].enabled] | all(. == "default"))
 ' >/dev/null; then
   ok "inherited arbitrary values take precedence over file values"
 else
@@ -103,6 +106,131 @@ if ! DEEP_REVIEW_CONFIG_FILE="$T/empty.env" bash "$RESOLVER" \
 else
   ng "empty configured reviewer values fail closed"
 fi
+
+echo "== C05: disabled reviewers may remain unconfigured =="
+for enabled_reviewer in claude codex; do
+  if [ "$enabled_reviewer" = claude ]; then
+    printf '%s\n' 'CLAUDE_REVIEW_MODEL=single-claude' 'CLAUDE_REVIEW_EFFORT=high' \
+      'CODEX_REVIEW_ENABLED=false' > "$T/single.env"
+  else
+    printf '%s\n' 'CODEX_REVIEW_MODEL=single-codex' 'CODEX_REVIEW_REASONING_EFFORT=xhigh' \
+      'CLAUDE_REVIEW_ENABLED=false' > "$T/single.env"
+  fi
+  single_json=$(CLAUDE_REVIEW_MODEL='' CLAUDE_REVIEW_EFFORT='' \
+    CODEX_REVIEW_MODEL='' CODEX_REVIEW_REASONING_EFFORT='' \
+    DEEP_REVIEW_CONFIG_FILE="$T/single.env" bash "$RESOLVER")
+  printf '%s\n' "$single_json" > "$T/single.json"
+  if printf '%s' "$single_json" | jq -e --arg reviewer "$enabled_reviewer" '
+    (if $reviewer == "claude" then "codex" else "claude" end) as $disabled |
+    .reviewerConfig[$reviewer].enabled == true and
+    .reviewerConfigSources[$reviewer].enabled == "default" and
+    .reviewerConfig[$disabled].enabled == false and
+    .reviewerConfig[$disabled].model == null and
+    .reviewerConfigSources[$disabled].enabled == "config-file" and
+    .reviewerConfigSources[$disabled].model == null and
+    (if $disabled == "claude" then
+      .reviewerConfig.claude.effort == null and .reviewerConfigSources.claude.effort == null
+    else
+      .reviewerConfig.codex.reasoningEffort == null and .reviewerConfigSources.codex.reasoningEffort == null
+    end)
+  ' >/dev/null && node "$TEST_DIR/../scripts/reviewer-selection.mjs" \
+    --context "$T/single.json" --validate-config > "$T/enabled.json" &&
+    jq -e --arg reviewer "$enabled_reviewer" '. == [$reviewer]' "$T/enabled.json" >/dev/null; then
+    ok "$enabled_reviewer-only config retains disabled null values and correct sources"
+  else
+    ng "$enabled_reviewer-only config retains disabled null values and correct sources"
+  fi
+done
+
+echo "== C06: selection overrides and configured disabled values are retained =="
+printf '%s\n' 'CLAUDE_REVIEW_ENABLED=false' 'CODEX_REVIEW_ENABLED=true' \
+  'CLAUDE_REVIEW_MODEL=optional-claude-model' 'CODEX_REVIEW_MODEL=file-codex' \
+  'CODEX_REVIEW_REASONING_EFFORT=xhigh' > "$T/selection.env"
+override_json=$(CLAUDE_REVIEW_ENABLED=true CODEX_REVIEW_ENABLED=false \
+  CLAUDE_REVIEW_MODEL='' CLAUDE_REVIEW_EFFORT=high \
+  CODEX_REVIEW_MODEL='' CODEX_REVIEW_REASONING_EFFORT='' \
+  DEEP_REVIEW_CONFIG_FILE="$T/selection.env" bash "$RESOLVER")
+if printf '%s' "$override_json" | jq -e '
+  .reviewerConfig.claude == {enabled:true,model:"optional-claude-model",effort:"high"} and
+  .reviewerConfig.codex == {enabled:false,model:"file-codex",reasoningEffort:"xhigh"} and
+  .reviewerConfigSources.claude.enabled == "environment" and
+  .reviewerConfigSources.codex.enabled == "environment" and
+  .reviewerConfigSources.codex.model == "config-file"
+' >/dev/null; then ok "environment selects reviewers independently of retained optional file values";
+else ng "environment selects reviewers independently of retained optional file values"; fi
+
+empty_environment_json=$(CLAUDE_REVIEW_ENABLED='' CODEX_REVIEW_ENABLED='' \
+  CLAUDE_REVIEW_MODEL='' CLAUDE_REVIEW_EFFORT='' \
+  CODEX_REVIEW_MODEL='' CODEX_REVIEW_REASONING_EFFORT='' \
+  DEEP_REVIEW_CONFIG_FILE="$T/selection.env" bash "$RESOLVER")
+if printf '%s' "$empty_environment_json" | jq -e '
+  .reviewerConfig.claude.enabled == false and .reviewerConfig.codex.enabled == true and
+  ([.reviewerConfigSources[].enabled] | all(. == "config-file"))
+' >/dev/null; then ok "empty environment enabled values use the configured file selection";
+else ng "empty environment enabled values use the configured file selection"; fi
+
+empty_default_json=$(CLAUDE_REVIEW_ENABLED='' CODEX_REVIEW_ENABLED='' \
+  CLAUDE_REVIEW_MODEL='' CLAUDE_REVIEW_EFFORT='' \
+  CODEX_REVIEW_MODEL='' CODEX_REVIEW_REASONING_EFFORT='' \
+  DEEP_REVIEW_CONFIG_FILE="$config_file" bash "$RESOLVER")
+if printf '%s' "$empty_default_json" | jq -e '
+  ([.reviewerConfig[].enabled] | all(. == true)) and
+  ([.reviewerConfigSources[].enabled] | all(. == "default"))
+' >/dev/null; then ok "empty environment enabled values default to true when the file omits flags";
+else ng "empty environment enabled values default to true when the file omits flags"; fi
+
+if ! CLAUDE_REVIEW_ENABLED=false CODEX_REVIEW_ENABLED=false \
+  DEEP_REVIEW_CONFIG_FILE="$config_file" bash "$RESOLVER" >"$T/both-disabled.json" 2>"$T/both-disabled.err" &&
+  rg -q 'at least one reviewer must be enabled' "$T/both-disabled.err"; then
+  ok "both reviewers disabled fails closed"
+else ng "both reviewers disabled fails closed"; fi
+
+for invalid in False yes 0 1 ' true' 'false '; do
+  if ! CLAUDE_REVIEW_ENABLED="$invalid" DEEP_REVIEW_CONFIG_FILE="$config_file" \
+    bash "$RESOLVER" >/dev/null 2>"$T/invalid-enabled.err" &&
+    rg -q 'CLAUDE_REVIEW_ENABLED must' "$T/invalid-enabled.err"; then
+    ok "invalid environment enabled value is rejected: [$invalid]"
+  else ng "invalid environment enabled value is rejected: [$invalid]"; fi
+done
+printf '%s\n' 'CODEX_REVIEW_ENABLED=false' 'CODEX_REVIEW_ENABLED=true' > "$T/duplicate-enabled.env"
+if ! DEEP_REVIEW_CONFIG_FILE="$T/duplicate-enabled.env" bash "$RESOLVER" \
+  >/dev/null 2>"$T/duplicate-enabled.err" && rg -q 'duplicate key: CODEX_REVIEW_ENABLED' "$T/duplicate-enabled.err"; then
+  ok "duplicate enabled keys fail closed"
+else ng "duplicate enabled keys fail closed"; fi
+printf '%s\n' 'CODEX_REVIEW_ENABLED=False' > "$T/invalid-enabled.env"
+if ! DEEP_REVIEW_CONFIG_FILE="$T/invalid-enabled.env" bash "$RESOLVER" \
+  >/dev/null 2>"$T/invalid-enabled-file.err" && rg -q 'CODEX_REVIEW_ENABLED must be true or false' "$T/invalid-enabled-file.err"; then
+  ok "invalid file enabled value fails closed"
+else ng "invalid file enabled value fails closed"; fi
+printf '%s\n' 'CODEX_REVIEW_ENABLED=' > "$T/empty-enabled.env"
+if ! CODEX_REVIEW_ENABLED=true DEEP_REVIEW_CONFIG_FILE="$T/empty-enabled.env" bash "$RESOLVER" \
+  >/dev/null 2>"$T/empty-enabled-file.err" && rg -q 'CODEX_REVIEW_ENABLED must be nonempty' "$T/empty-enabled-file.err"; then
+  ok "empty file enabled value fails closed even with an environment override"
+else ng "empty file enabled value fails closed even with an environment override"; fi
+
+if node --input-type=module - "$TEST_DIR/../scripts/reviewer-selection.mjs" <<'NODE'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+const {getEnabledReviewers, validateReviewerConfiguration} = await import(pathToFileURL(process.argv[2]));
+assert.deepEqual(getEnabledReviewers({}), ["claude", "codex"]);
+assert.deepEqual(getEnabledReviewers({reviewerConfig:{claude:{enabled:false}}}), ["codex"]);
+for (const value of [null, "true", "false", 0, 1]) {
+  assert.throws(() => getEnabledReviewers({reviewerConfig:{claude:{enabled:value}}}), /must be a boolean/);
+}
+assert.throws(() => getEnabledReviewers({reviewerConfig:{claude:{enabled:false},codex:{enabled:false}}}), /at least one/);
+const fixture = {
+  reviewerConfig:{claude:{enabled:true,model:"c",effort:"high"},codex:{enabled:false,model:null,reasoningEffort:null}},
+  reviewerConfigSources:{claude:{enabled:"default",model:"environment",effort:"environment"},codex:{enabled:"environment",model:null,reasoningEffort:null}},
+};
+validateReviewerConfiguration(fixture);
+fixture.reviewerConfigSources.codex.model = "environment";
+assert.throws(() => validateReviewerConfiguration(fixture), /codex.model/);
+fixture.reviewerConfigSources.codex.model = null;
+fixture.reviewerConfigSources.codex.enabled = "default";
+assert.throws(() => validateReviewerConfiguration(fixture), /default selection/);
+NODE
+then ok "context selection validates booleans, preserves legacy default, and binds optional sources";
+else ng "context selection validates booleans, preserves legacy default, and binds optional sources"; fi
 
 echo ""
 printf 'RESULT: pass=%s fail=%s\n' "$pass" "$fail"

@@ -8,6 +8,7 @@
 # shellcheck disable=SC2015,SC2016,SC2329
 
 set -uo pipefail
+unset CLAUDE_REVIEW_ENABLED CODEX_REVIEW_ENABLED
 
 SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPTS/.." && pwd)"
@@ -806,9 +807,16 @@ REVIEW_SNAPSHOT_METADATA_SHA256=$(node -e '
 ' "$REVIEW_SNAPSHOT.metadata.json")
 
 run_review() {
-  local prompt_template="$1" thread_id="${2:-}" run_id
+  local prompt_template="$1" thread_id="${2:-}" run_id review_context
   run_id="test-codex-$(date +%s)-$RANDOM"
+  review_context="${FAKE_REVIEW_CONTEXT:-}"
+  if [ -z "$review_context" ]; then
+    review_context=$(mktemp "$T/context.XXXXXX")
+    jq -n --arg model "${CODEX_REVIEW_MODEL:-}" --arg effort "${CODEX_REVIEW_REASONING_EFFORT:-}" \
+      '{reviewerConfig:{codex:{model:$model,reasoningEffort:$effort}}}' > "$review_context"
+  fi
   review_args=(
+    --context "$review_context"
     --project "$T/repo"
     --temp-root "$T/tmp"
     --prompt-template "$prompt_template"
@@ -897,6 +905,26 @@ p=$(mkreviewprompt)
 out=$(FAKE_ARGS_DIR="$args" FAKE_MODE=fast CODEX_REVIEW_MODEL= CODEX_REVIEW_REASONING_EFFORT= run_review "$p" 2>"$T/t01b.err"); rc=$?
 check "$rc" "2" "missing reviewer settings stop the runner"
 contains "$(cat "$T/t01b.err")" "CODEX_REVIEW_MODEL is not configured" "missing reviewer settings are reported"
+
+echo "== T01c: direct reviewer launch honors only the fixed selection =="
+jq -n '{reviewerConfig:{claude:{enabled:true},codex:{enabled:false,model:"disabled",reasoningEffort:"high"}}}' \
+  > "$T/disabled-codex-context.json"
+rm -f "$LAUNCH_FILE"
+out=$(FAKE_ARGS_DIR="$(new_args_dir)" FAKE_MODE=fast \
+  FAKE_REVIEW_CONTEXT="$T/disabled-codex-context.json" \
+  CODEX_REVIEW_ENABLED=true run_review "$p" 2>"$T/t01c.err"); rc=$?
+check "$rc" "2" "direct Codex invocation rejects a context-disabled reviewer"
+contains "$(cat "$T/t01c.err")" "codex reviewer is disabled" "disabled Codex selection is reported"
+[ ! -e "$LAUNCH_FILE" ] && ok "disabled Codex is rejected before the CLI starts" || ng "disabled Codex is rejected before the CLI starts"
+jq -n '{reviewerConfig:{claude:{enabled:false},codex:{enabled:true,model:"frozen-direct-model",reasoningEffort:"high"}}}' \
+  > "$T/enabled-codex-context.json"
+args=$(new_args_dir)
+out=$(FAKE_ARGS_DIR="$args" FAKE_MODE=fast FAKE_REVIEW_CONTEXT="$T/enabled-codex-context.json" \
+  CODEX_REVIEW_ENABLED=false CODEX_REVIEW_MODEL=changed-model \
+  CODEX_REVIEW_REASONING_EFFORT=low run_review "$p" 2>"$T/t01c-frozen.err"); rc=$?
+check "$rc" "0" "direct Codex invocation ignores later environment selection changes"
+check "$(arg_after "$args" --model)" "frozen-direct-model" "direct Codex invocation uses its context model"
+check "$(arg_after "$args" -c)" "model_reasoning_effort=high" "direct Codex invocation uses its context effort"
 
 echo "== T02: resume keeps the supplied thread when thread.started is absent =="
 args=$(new_args_dir)
@@ -1231,7 +1259,8 @@ file_contains "$REVIEW_SKILL" "親レビュー工程から独立したleaf revie
 file_contains "$WORKFLOW" '--thread-id' "timeout recovery resumes the captured Codex thread"
 file_contains "$WORKFLOW" '--resume-session-id' "timeout recovery resumes the captured Claude session"
 file_contains "$REVIEW_SKILL" "retryまたはfinalize-only resumeは最大1回" "retry count is bounded per initial invocation"
-file_contains "$HOST_ADAPTERS" "外部Claudeと外部Codexをホストによらず同時実行する" "host adapters preserve independent concurrent execution"
+file_contains "$HOST_ADAPTERS" "選択したreviewerをホストによらず起動し" "host adapters keep reviewer selection independent of host"
+file_contains "$HOST_ADAPTERS" "両方有効なら外部Claudeと外部Codexを同時実行する" "host adapters preserve concurrent execution when both reviewers are enabled"
 file_contains "$CODEX_PREPARER" "期待する行内容はpromptに記録されていません" "Codex prompt withholds the expected diff probe"
 file_contains "$CODEX_VERIFIER" "Codex diff access probe is missing" "Codex verifier rejects missing diff access proof"
 file_contains "$CODEX_VERIFIER" 'verifyReviewBody(body, "Codex")' "Codex and Claude share the review body contract"
@@ -1296,6 +1325,7 @@ out=$(
   FAKE_ARGS_DIR="$args" FAKE_MODE=fast \
   CODEX_REVIEW_MODEL=ambient-codex-model \
   CODEX_REVIEW_REASONING_EFFORT=low \
+  CLAUDE_REVIEW_ENABLED=false CODEX_REVIEW_ENABLED=false \
     bash "$SKILL_DIR/scripts/launch-run-codex.sh" \
       --context "$launcher_context_path" "${launcher_args[@]}" \
       2>"$T/t17-success.err"
@@ -1310,6 +1340,32 @@ check "$(arg_after "$args" --model)" "context-codex-model" \
   "trusted launcher uses the context-fixed Codex model"
 check "$(arg_after "$args" -c)" "model_reasoning_effort=xhigh" \
   "trusted launcher uses the context-fixed Codex reasoning effort"
+
+echo "== T17a: launcher accepts Codex-only settings and rejects disabled Codex =="
+cp "$launcher_context_path" "$T/original-launcher-context.json"
+chmod 600 "$launcher_context_path"
+jq '.reviewerConfig.claude = {enabled:false,model:null,effort:null} |
+  .reviewerConfigSources.claude = {enabled:"environment",model:null,effort:null}' \
+  "$T/original-launcher-context.json" > "$launcher_context_path"
+chmod 400 "$launcher_context_path"
+args=$(new_args_dir)
+out=$(FAKE_ARGS_DIR="$args" FAKE_MODE=fast \
+  bash "$SKILL_DIR/scripts/launch-run-codex.sh" --context "$launcher_context_path" \
+    "${launcher_args[@]}" 2>"$T/t17a-single.err"); rc=$?
+check "$rc" "0" "Codex-only trusted launcher does not require disabled Claude settings"
+chmod 600 "$launcher_context_path"
+jq '.reviewerConfig.codex.enabled = false | .reviewerConfigSources.codex.enabled = "environment"' \
+  "$T/original-launcher-context.json" > "$launcher_context_path"
+chmod 400 "$launcher_context_path"
+rm -f "$LAUNCH_FILE"
+out=$(FAKE_ARGS_DIR="$(new_args_dir)" FAKE_MODE=fast \
+  bash "$SKILL_DIR/scripts/launch-run-codex.sh" --context "$launcher_context_path" \
+    "${launcher_args[@]}" 2>"$T/t17a-disabled.err"); rc=$?
+check "$rc" "1" "Codex trusted launcher rejects a disabled reviewer"
+[ ! -e "$LAUNCH_FILE" ] && ok "trusted disabled Codex is rejected before CLI start" || ng "trusted disabled Codex is rejected before CLI start"
+chmod 600 "$launcher_context_path"
+cat "$T/original-launcher-context.json" > "$launcher_context_path"
+chmod 400 "$launcher_context_path"
 
 chmod 600 "$launcher_context_path"
 rm -f "$LAUNCH_FILE"

@@ -15,8 +15,8 @@
 #     [--claude-resume-session-id <session-id>] \
 #     [--codex-thread-id <thread-id>]
 #
-# Attempt 1 must launch both reviewers. Later attempts may launch only the
-# failed reviewer, or both reviewers when both are retryable. Every attempt is
+# Attempt 1 must launch all enabled reviewers. Later attempts may launch only
+# failed enabled reviewers. Every attempt is
 # immutable. The phase status selects the latest successful attempt per model,
 # or the latest failed attempt when that model has no success.
 # Exit 3 preserves an execution-infrastructure refusal; exits 20 and 21 remain
@@ -68,7 +68,8 @@ CLAUDE_PROMPT=""
 CODEX_PROMPT=""
 PHASE=""
 ROUND=""
-REVIEWER="both"
+REVIEWER=""
+REVIEWER_SUPPLIED=false
 ATTEMPT=1
 CLAUDE_RESUME_SESSION_ID=""
 CODEX_THREAD_ID=""
@@ -124,7 +125,12 @@ while [ "$#" -gt 0 ]; do
     --codex-prompt) require_option_value "$@"; CODEX_PROMPT="$2"; shift 2 ;;
     --phase) require_option_value "$@"; PHASE="$2"; shift 2 ;;
     --round) require_option_value "$@"; ROUND="$2"; shift 2 ;;
-    --reviewer) require_option_value "$@"; REVIEWER="$2"; shift 2 ;;
+    --reviewer)
+      require_option_value "$@"
+      REVIEWER="$2"
+      REVIEWER_SUPPLIED=true
+      shift 2
+      ;;
     --attempt) require_option_value "$@"; ATTEMPT="$2"; shift 2 ;;
     --wave-status) require_option_value "$@"; WAVE_STATUS_PATH="$2"; shift 2 ;;
     --wave-role) require_option_value "$@"; WAVE_ROLE="$2"; shift 2 ;;
@@ -152,40 +158,8 @@ if [ -z "$CONTEXT_PATH" ] || [ -z "$PHASE" ]; then
   usage
   exit 2
 fi
-case "$REVIEWER" in
-  both)
-    CLAUDE_REQUESTED=true
-    CODEX_REQUESTED=true
-    ;;
-  claude) CLAUDE_REQUESTED=true ;;
-  codex) CODEX_REQUESTED=true ;;
-  *)
-    echo "ERROR: --reviewer must be both, claude, or codex" >&2
-    exit 2
-    ;;
-esac
 if ! [[ "$ATTEMPT" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: --attempt must be a positive integer" >&2
-  exit 2
-fi
-if [ "$ATTEMPT" -eq 1 ] && [ "$REVIEWER" != "both" ]; then
-  echo "ERROR: attempt 1 must launch both reviewers" >&2
-  exit 2
-fi
-if $CLAUDE_REQUESTED && [ -z "$CLAUDE_PROMPT" ]; then
-  echo "ERROR: --claude-prompt is required for the selected reviewer" >&2
-  exit 2
-fi
-if $CODEX_REQUESTED && [ -z "$CODEX_PROMPT" ]; then
-  echo "ERROR: --codex-prompt is required for the selected reviewer" >&2
-  exit 2
-fi
-if ! $CLAUDE_REQUESTED && [ -n "$CLAUDE_RESUME_SESSION_ID" ]; then
-  echo "ERROR: --claude-resume-session-id requires --reviewer claude or both" >&2
-  exit 2
-fi
-if ! $CODEX_REQUESTED && [ -n "$CODEX_THREAD_ID" ]; then
-  echo "ERROR: --codex-thread-id requires --reviewer codex or both" >&2
   exit 2
 fi
 if [ "$ATTEMPT" -eq 1 ] &&
@@ -253,6 +227,51 @@ if [ ! -f "$CONTEXT_PATH" ] || [ -L "$CONTEXT_PATH" ]; then
   echo "ERROR: input must be a regular non-symlink file: $CONTEXT_PATH" >&2
   exit 2
 fi
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ERROR: jq is required but not installed" >&2
+  exit 2
+fi
+EXPECTED_REVIEWERS=$(node "$SCRIPT_DIR/reviewer-selection.mjs" \
+  --context "$CONTEXT_PATH") || exit 2
+CLAUDE_ENABLED=$(printf '%s' "$EXPECTED_REVIEWERS" | jq -r 'index("claude") != null')
+CODEX_ENABLED=$(printf '%s' "$EXPECTED_REVIEWERS" | jq -r 'index("codex") != null')
+if ! $REVIEWER_SUPPLIED; then
+  REVIEWER=$(printf '%s' "$EXPECTED_REVIEWERS" | \
+    jq -r 'if length == 2 then "both" else .[0] end')
+fi
+case "$REVIEWER" in
+  both) CLAUDE_REQUESTED=true; CODEX_REQUESTED=true ;;
+  claude) CLAUDE_REQUESTED=true ;;
+  codex) CODEX_REQUESTED=true ;;
+  *) echo "ERROR: --reviewer must be both, claude, or codex" >&2; exit 2 ;;
+esac
+if { $CLAUDE_REQUESTED && ! $CLAUDE_ENABLED; } ||
+  { $CODEX_REQUESTED && ! $CODEX_ENABLED; }; then
+  echo "ERROR: --reviewer includes a disabled reviewer" >&2
+  exit 2
+fi
+if [ "$ATTEMPT" -eq 1 ] &&
+  { [ "$CLAUDE_REQUESTED" != "$CLAUDE_ENABLED" ] ||
+    [ "$CODEX_REQUESTED" != "$CODEX_ENABLED" ]; }; then
+  echo "ERROR: attempt 1 must launch all enabled reviewers" >&2
+  exit 2
+fi
+if $CLAUDE_REQUESTED && [ -z "$CLAUDE_PROMPT" ]; then
+  echo "ERROR: --claude-prompt is required for the selected reviewer" >&2
+  exit 2
+fi
+if $CODEX_REQUESTED && [ -z "$CODEX_PROMPT" ]; then
+  echo "ERROR: --codex-prompt is required for the selected reviewer" >&2
+  exit 2
+fi
+if ! $CLAUDE_REQUESTED && [ -n "$CLAUDE_RESUME_SESSION_ID" ]; then
+  echo "ERROR: --claude-resume-session-id requires the Claude reviewer" >&2
+  exit 2
+fi
+if ! $CODEX_REQUESTED && [ -n "$CODEX_THREAD_ID" ]; then
+  echo "ERROR: --codex-thread-id requires the Codex reviewer" >&2
+  exit 2
+fi
 if $CLAUDE_REQUESTED &&
   { [ ! -f "$CLAUDE_PROMPT" ] || [ -L "$CLAUDE_PROMPT" ]; }; then
   echo "ERROR: input must be a regular non-symlink file: $CLAUDE_PROMPT" >&2
@@ -261,10 +280,6 @@ fi
 if $CODEX_REQUESTED &&
   { [ ! -f "$CODEX_PROMPT" ] || [ -L "$CODEX_PROMPT" ]; }; then
   echo "ERROR: input must be a regular non-symlink file: $CODEX_PROMPT" >&2
-  exit 2
-fi
-if ! command -v jq >/dev/null 2>&1; then
-  echo "ERROR: jq is required but not installed" >&2
   exit 2
 fi
 
@@ -291,7 +306,10 @@ SKILL_DIR=$(value .skillDir)
 PROJECT_ROOT=$(value .projectRoot)
 REVIEW_TEMP_ROOT=$(value .reviewTempRoot)
 REVIEW_ARTIFACT_DIR=$(value .reviewArtifactDir)
-CODEX_LAUNCHER=$(value .codexLauncherPath)
+CODEX_LAUNCHER=""
+if $CODEX_REQUESTED; then
+  CODEX_LAUNCHER=$(value .codexLauncherPath)
+fi
 RUN_ID=$(value .reviewRunId)
 TARGET=$(value .target)
 HEAD_SHA=$(value .headSha)
@@ -308,7 +326,8 @@ if ! paths_match "$SCRIPT_DIR" "$SKILL_DIR_REAL/scripts"; then
   echo "ERROR: pair runner must execute from the context's tooling snapshot" >&2
   exit 1
 fi
-if [ ! -f "$CODEX_LAUNCHER" ] || [ -L "$CODEX_LAUNCHER" ]; then
+if $CODEX_REQUESTED &&
+  { [ ! -f "$CODEX_LAUNCHER" ] || [ -L "$CODEX_LAUNCHER" ]; }; then
   echo "ERROR: trusted Codex launcher is unavailable" >&2
   exit 1
 fi
@@ -501,9 +520,10 @@ else
     --arg phase "$PHASE" \
     --arg round "$ROUND" \
     --arg reviewRunId "$RUN_ID" \
+    --argjson expectedReviewers "$EXPECTED_REVIEWERS" \
     '.schema == "deep-review-pair/v6" and
      .reviewRunId == $reviewRunId and
-     .expectedReviewers == ["claude", "codex"] and
+     .expectedReviewers == $expectedReviewers and
      .phase == $phase and
      .round == (if $round == "" then null else ($round | tonumber) end) and
      (.attempts | type == "array" and length > 0) and
@@ -799,7 +819,8 @@ publish_pair_status() {
   jq -s \
     --arg phase "$PHASE" \
     --arg round "$ROUND" \
-    --arg reviewRunId "$RUN_ID" '
+    --arg reviewRunId "$RUN_ID" \
+    --argjson expectedReviewers "$EXPECTED_REVIEWERS" '
       sort_by(.attempt) as $attempts |
       def canonical($reviewer):
         [$attempts[] as $attempt |
@@ -815,15 +836,14 @@ publish_pair_status() {
       {
         schema:"deep-review-pair/v6",
         reviewRunId:$reviewRunId,
-        expectedReviewers:["claude","codex"],
+        expectedReviewers:$expectedReviewers,
         phase:$phase,
         round:(if $round == "" then null else ($round | tonumber) end),
         attempts:$attempts,
         canonical:{claude:$claude,codex:$codex},
-        complete:(
-          $claude != null and $claude.exitCode == 0 and
-          $codex != null and $codex.exitCode == 0
-        )
+        complete:({claude:$claude,codex:$codex} as $canonical |
+          all($expectedReviewers[]; $canonical[.] != null and
+            $canonical[.].exitCode == 0))
       }
     ' "${attempt_statuses[@]}" > "$status_temp" || {
       rm -f "$status_temp"
@@ -1142,7 +1162,7 @@ stop_wave_cancel_watcher
 
 finalize_output_evidence
 
-# Both reviewer processes and their output evidence are final. Keep the
+# All requested reviewer processes and their output evidence are final. Keep the
 # immutable attempt/pair status and wave result consistent if a cancellation
 # arrives during this last publication-only section.
 trap '' INT TERM HUP
@@ -1163,11 +1183,17 @@ if $CODEX_REQUESTED; then
   printf 'CODEX_EXIT_CODE: %s\n' "$CODEX_RC"
 fi
 
-CANONICAL_CLAUDE_RC=$(jq -r '.canonical.claude.exitCode // 125' "$STATUS_PATH")
-CANONICAL_CODEX_RC=$(jq -r '.canonical.codex.exitCode // 125' "$STATUS_PATH")
+PAIR_EXIT_ARGS=()
+if $CLAUDE_ENABLED; then
+  PAIR_EXIT_ARGS+=(--claude-exit-code \
+    "$(jq -r '.canonical.claude.exitCode // 125' "$STATUS_PATH")")
+fi
+if $CODEX_ENABLED; then
+  PAIR_EXIT_ARGS+=(--codex-exit-code \
+    "$(jq -r '.canonical.codex.exitCode // 125' "$STATUS_PATH")")
+fi
 PAIR_EXIT_CODE=$(node "$PAIR_POLICY_TOOL" exit-code \
-  --claude-exit-code "$CANONICAL_CLAUDE_RC" \
-  --codex-exit-code "$CANONICAL_CODEX_RC") || {
+  "${PAIR_EXIT_ARGS[@]}") || {
   echo "ERROR: failed to determine pair exit code" >&2
   exit 1
 }

@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 
 import { createPromptManifest } from "./review-prompt-manifest.mjs";
+import { assertReviewerEnabled } from "./reviewer-selection.mjs";
 
 const QUALITY_CONTRACT_URL = new URL(
   "../references/review-quality-contract.md",
@@ -298,6 +299,7 @@ function buildPrompt(
 try {
   const args = parseArgs(process.argv.slice(2));
   const context = loadContext(args.context);
+  assertReviewerEnabled(context, args.reviewer);
   const prompt =
     args.purpose === "resume"
       ? buildResumePrompt(context, args.phase, args.round, args.reviewer)

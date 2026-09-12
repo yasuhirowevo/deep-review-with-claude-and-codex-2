@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -uo pipefail
+unset CLAUDE_REVIEW_ENABLED CODEX_REVIEW_ENABLED
 
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SKILL_DIR="$(cd -P "$TEST_DIR/.." && pwd -P)"
@@ -65,6 +66,8 @@ run_preflight() {
   (
     cd "$T/fake-cwd"
     PATH="$T/bin:$PATH" \
+      CLAUDE_REVIEW_MODEL='' CLAUDE_REVIEW_EFFORT='' \
+      CODEX_REVIEW_MODEL='' CODEX_REVIEW_REASONING_EFFORT='' \
       DEEP_REVIEW_CONFIG_FILE="$T/reviewer.env" \
       DEEP_REVIEW_TEMP_ROOT="$T/temp" \
       REVIEWER_MARKER="$T/reviewer-launched" \
@@ -293,9 +296,11 @@ printf 'stdout failure change\n' >> "$STDOUT_REPO/README.md"
 git_fixture "$STDOUT_REPO" add README.md
 git_fixture "$STDOUT_REPO" commit -qm head
 STDOUT_HEAD=$(git -C "$STDOUT_REPO" rev-parse HEAD)
+# /dev/full is unavailable on macOS and fails before preflight starts. Closing
+# stdout keeps the final-output failure and the same completed-input cleanup check.
 run_preflight --project "$STDOUT_REPO" --host codex \
   --branch "$STDOUT_HEAD" --base "$STDOUT_BASE" \
-  >/dev/full 2>"$T/stdout-failure.err"
+  1>&- 2>"$T/stdout-failure.err"
 stdout_failure_rc=$?
 failed_context=$(find "$STDOUT_REPO/_tmp/reviews/runs" \
   -type f -name context.json -print -quit 2>/dev/null || true)
@@ -308,6 +313,42 @@ if [ "$stdout_failure_rc" -ne 0 ] && [ -n "$failed_context" ] &&
 else
   ng "nonzero exit after preflight publication still cleans temporary run inputs"
 fi
+
+echo "== PF07: host and fixed reviewer selection are independent =="
+for host in claude codex; do
+  for reviewer in claude codex; do
+    if [ "$reviewer" = claude ]; then
+      printf '%s\n' 'CLAUDE_REVIEW_MODEL=single-claude' 'CLAUDE_REVIEW_EFFORT=high' \
+        'CODEX_REVIEW_ENABLED=false' > "$T/reviewer.env"
+    else
+      printf '%s\n' 'CODEX_REVIEW_MODEL=single-codex' 'CODEX_REVIEW_REASONING_EFFORT=xhigh' \
+        'CLAUDE_REVIEW_ENABLED=false' > "$T/reviewer.env"
+    fi
+    single_result=$(run_preflight --project "$BRANCH_REPO" --host "$host" \
+      --branch "$BRANCH_HEAD" --base "$BRANCH_BASE")
+    single_context=$(printf '%s' "$single_result" | jq -r .contextPath)
+    single_skill=$(jq -r .skillDir "$single_context")
+    if printf '%s' "$single_result" | jq -e --arg host "$host" '.status == "passed" and .host == $host' >/dev/null &&
+      node "$single_skill/scripts/reviewer-selection.mjs" --context "$single_context" |
+        jq -e --arg reviewer "$reviewer" '. == [$reviewer]' >/dev/null &&
+      CLAUDE_REVIEW_ENABLED=false CODEX_REVIEW_ENABLED=false \
+        DEEP_REVIEW_CONFIG_FILE="$T/does-not-exist.env" \
+        bash "$single_skill/scripts/verify-review-run.sh" "$single_context" >/dev/null &&
+      [ ! -e "$T/reviewer-launched" ]; then
+      ok "$host host prepares and verifies $reviewer-only review after environment changes"
+    else ng "$host host prepares and verifies $reviewer-only review after environment changes"; fi
+    cleanup_result "$single_result"
+  done
+done
+
+echo "== PF08: disabled selection fails before target preparation =="
+printf '%s\n' 'CLAUDE_REVIEW_ENABLED=false' 'CODEX_REVIEW_ENABLED=false' > "$T/reviewer.env"
+if ! run_preflight --project "$T/nonexistent-project" --host codex --branch HEAD \
+  >"$T/both-disabled.out" 2>"$T/both-disabled.err" &&
+  rg -q 'at least one reviewer must be enabled' "$T/both-disabled.err" &&
+  [ ! -s "$T/both-disabled.out" ] && [ ! -e "$T/reviewer-launched" ]; then
+  ok "both disabled fails before repository preparation or external launch"
+else ng "both disabled fails before repository preparation or external launch"; fi
 
 printf '\nResult: %d pass / %d fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

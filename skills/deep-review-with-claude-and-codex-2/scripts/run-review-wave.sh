@@ -45,8 +45,9 @@ usage() {
   cat >&2 <<'USAGE'
 Usage: run-review-wave.sh \
   --context <context.json> --first-round <1..19> \
-  --claude-lead-prompt <path> --codex-lead-prompt <path> \
-  --claude-speculative-prompt <path> --codex-speculative-prompt <path>
+  [--claude-lead-prompt <path> --claude-speculative-prompt <path>] \
+  [--codex-lead-prompt <path> --codex-speculative-prompt <path>]
+Prompts are required only for enabled reviewers.
 USAGE
 }
 
@@ -79,10 +80,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-for required in \
-  "$CONTEXT_PATH" "$FIRST_ROUND" \
-  "$CLAUDE_LEAD_PROMPT" "$CODEX_LEAD_PROMPT" \
-  "$CLAUDE_SPECULATIVE_PROMPT" "$CODEX_SPECULATIVE_PROMPT"; do
+for required in "$CONTEXT_PATH" "$FIRST_ROUND"; do
   if [ -z "$required" ]; then
     usage
     exit 2
@@ -96,14 +94,6 @@ if [ ! -f "$CONTEXT_PATH" ] || [ -L "$CONTEXT_PATH" ]; then
   echo "ERROR: review context must be a regular non-symlink file" >&2
   exit 2
 fi
-for prompt in \
-  "$CLAUDE_LEAD_PROMPT" "$CODEX_LEAD_PROMPT" \
-  "$CLAUDE_SPECULATIVE_PROMPT" "$CODEX_SPECULATIVE_PROMPT"; do
-  if [ ! -f "$prompt" ] || [ -L "$prompt" ]; then
-    echo "ERROR: wave prompt must be a regular non-symlink file: $prompt" >&2
-    exit 2
-  fi
-done
 
 SKILL_DIR=$(jq -er .skillDir "$CONTEXT_PATH") || exit 2
 REVIEW_TEMP_ROOT=$(jq -er .reviewTempRoot "$CONTEXT_PATH") || exit 2
@@ -124,6 +114,24 @@ for tool in "$STATE_TOOL" "$PAIR_RUNNER"; do
   fi
 done
 
+EXPECTED_REVIEWERS=$(node "$SCRIPT_DIR/reviewer-selection.mjs" \
+  --context "$CONTEXT_PATH") || exit 2
+RESERVE_PROMPT_ARGS=()
+LEAD_PROMPT_ARGS=()
+SPECULATIVE_PROMPT_ARGS=()
+if [ "$(printf '%s' "$EXPECTED_REVIEWERS" | jq -r 'index("claude") != null')" = true ]; then
+  RESERVE_PROMPT_ARGS+=(--claude-lead-prompt "$CLAUDE_LEAD_PROMPT" \
+    --claude-speculative-prompt "$CLAUDE_SPECULATIVE_PROMPT")
+  LEAD_PROMPT_ARGS+=(--claude-prompt "$CLAUDE_LEAD_PROMPT")
+  SPECULATIVE_PROMPT_ARGS+=(--claude-prompt "$CLAUDE_SPECULATIVE_PROMPT")
+fi
+if [ "$(printf '%s' "$EXPECTED_REVIEWERS" | jq -r 'index("codex") != null')" = true ]; then
+  RESERVE_PROMPT_ARGS+=(--codex-lead-prompt "$CODEX_LEAD_PROMPT" \
+    --codex-speculative-prompt "$CODEX_SPECULATIVE_PROMPT")
+  LEAD_PROMPT_ARGS+=(--codex-prompt "$CODEX_LEAD_PROMPT")
+  SPECULATIVE_PROMPT_ARGS+=(--codex-prompt "$CODEX_SPECULATIVE_PROMPT")
+fi
+
 SPECULATIVE_ROUND=$((FIRST_ROUND + 1))
 WAVE_SUPERVISOR_PID=$$
 case "$OSTYPE" in
@@ -140,10 +148,7 @@ RESERVATION=$(node "$STATE_TOOL" reserve \
   --context "$CONTEXT_PATH" \
   --first-round "$FIRST_ROUND" \
   --supervisor-pid "$WAVE_SUPERVISOR_PID" \
-  --claude-lead-prompt "$CLAUDE_LEAD_PROMPT" \
-  --codex-lead-prompt "$CODEX_LEAD_PROMPT" \
-  --claude-speculative-prompt "$CLAUDE_SPECULATIVE_PROMPT" \
-  --codex-speculative-prompt "$CODEX_SPECULATIVE_PROMPT") || exit 2
+  "${RESERVE_PROMPT_ARGS[@]}") || exit 2
 WAVE_STATUS_PATH=$(printf '%s' "$RESERVATION" | jq -er .statusPath) || exit 2
 WAVE_SUPERVISOR_NONCE=$(printf '%s' "$RESERVATION" |
   jq -er .status.supervisor.nonce) || exit 2
@@ -581,11 +586,9 @@ if [ "$LAUNCH_LEAD" = "true" ]; then
     WAVE_REVIEWER_AUTHORIZATION_WAIT_SECONDS="$WAVE_RECOVERY_WAIT_SECONDS" \
       bash "$PAIR_RUNNER" \
       --context "$CONTEXT_PATH" \
-      --claude-prompt "$CLAUDE_LEAD_PROMPT" \
-      --codex-prompt "$CODEX_LEAD_PROMPT" \
+      "${LEAD_PROMPT_ARGS[@]}" \
       --phase convergence \
       --round "$FIRST_ROUND" \
-      --reviewer both \
       --attempt 1 \
       --wave-status "$WAVE_STATUS_PATH" \
       --wave-role lead \
@@ -630,11 +633,9 @@ if [ "$LAUNCH_SPECULATIVE" = "true" ]; then
     WAVE_REVIEWER_AUTHORIZATION_WAIT_SECONDS="$WAVE_RECOVERY_WAIT_SECONDS" \
       bash "$PAIR_RUNNER" \
       --context "$CONTEXT_PATH" \
-      --claude-prompt "$CLAUDE_SPECULATIVE_PROMPT" \
-      --codex-prompt "$CODEX_SPECULATIVE_PROMPT" \
+      "${SPECULATIVE_PROMPT_ARGS[@]}" \
       --phase convergence \
       --round "$SPECULATIVE_ROUND" \
-      --reviewer both \
       --attempt 1 \
       --wave-status "$WAVE_STATUS_PATH" \
       --wave-role speculative \
@@ -755,12 +756,13 @@ if [ "$LEAD_RC" -ne 0 ]; then
   LEAD_STATUS_PATH="$LEAD_ARTIFACT_DIR/status.json"
   while true; do
     if [ -f "$LEAD_STATUS_PATH" ] && [ ! -L "$LEAD_STATUS_PATH" ] &&
-      jq -e '
+      jq -e --argjson expectedReviewers "$EXPECTED_REVIEWERS" '
         .schema == "deep-review-pair/v6" and
         .phase == "convergence" and
+        .expectedReviewers == $expectedReviewers and
         .complete == true and
-        .canonical.claude.exitCode == 0 and
-        .canonical.codex.exitCode == 0
+        (.canonical as $canonical |
+          all($expectedReviewers[]; $canonical[.].exitCode == 0))
       ' "$LEAD_STATUS_PATH" >/dev/null; then
       exit 0
     fi

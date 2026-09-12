@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { assertReviewerEnabled } from "./reviewer-selection.mjs";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
@@ -89,6 +90,7 @@ export function createPromptManifest({
 }) {
   assertContext(context);
   const identity = normalizeIdentity({ reviewer, phase, round, purpose });
+  assertReviewerEnabled(context, reviewer);
   assertRegularFile(promptPath, "review prompt");
   const promptRealPath = realpathSync(promptPath);
   const promptBytes = readFileSync(promptRealPath);
@@ -125,6 +127,7 @@ export function verifyPromptManifest({
 }) {
   assertContext(context);
   const identity = normalizeIdentity({ reviewer, phase, round, purpose });
+  assertReviewerEnabled(context, reviewer);
   assertRegularFile(promptPath, "review prompt");
   const promptRealPath = realpathSync(promptPath);
   const manifestPath = manifestPathForPrompt(promptRealPath);

@@ -26,13 +26,15 @@ import {
 import { readPrReviewContextArtifacts } from "./review-pr-context.mjs";
 import { inspectReviewWaves } from "./review-wave-state.mjs";
 import { toNativeAbsolutePath } from "./path-interop.mjs";
+import { getEnabledReviewers } from "./reviewer-selection.mjs";
 
 const MAX_REPORT_BYTES = 4 * 1024 * 1024;
 const MAX_CONVERGENCE_ROUNDS = 20;
 const SEVERITIES = ["Critical", "High", "Medium", "Low"];
+const REVIEWERS = ["claude", "codex"];
 const PREFIX = { Critical: "C", High: "H", Medium: "M", Low: "L" };
 const HANDLING_LABEL_SET = new Set(Object.values(HANDLING_LABELS));
-const REVIEWER_STATES = new Set(["成功", "失敗", "未起動"]);
+const REVIEWER_STATES = new Set(["成功", "失敗", "未起動", "未選択"]);
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const UUID_PATTERN =
@@ -451,7 +453,8 @@ function validateDialogueAccounting(
   primary,
   rounds,
   finalFindingSet,
-  reportTreatments
+  reportTreatments,
+  reviewers,
 ) {
   if (!layout.overviewRows) return;
   if (layout.overviewRows.length !== 4)
@@ -508,7 +511,11 @@ function validateDialogueAccounting(
     const row = layout.roundSeverityRows[index];
     if (row.length !== 4 || row[0] !== (index === 0 ? "初回" : String(index)))
       fail("dialogue severity round numbering is invalid");
-    const counts = row.slice(1).map((value) => {
+    const counts = row.slice(1).map((value, column) => {
+      if (column < 2 && !reviewers.includes(REVIEWERS[column])) {
+        if (value !== "—") fail("unselected reviewer severity counts must use —");
+        return null;
+      }
       const match = value.match(/^C(\d+) H(\d+) M(\d+) L(\d+)（計(\d+)）$/u);
       if (!match)
         fail("dialogue severity counts need C/H/M/L labels and a total");
@@ -517,8 +524,14 @@ function validateDialogueAccounting(
         fail("dialogue severity total does not match its counts");
       return values;
     });
-    if (!adjudication?.inputs) return; // Standalone validation has no raw artifacts.
-    const evidence = ["claude", "codex"].map((model, column) => {
+    if (!primary) return; // Standalone validation has no raw artifacts.
+    const evidence = REVIEWERS.map((model, column) => {
+      if (!reviewers.includes(model)) {
+        if (adjudication.inputs[model] !== null) {
+          fail("unselected reviewer must not have adjudication evidence");
+        }
+        return [];
+      }
       // These evidence files and hashes were validated with the adjudication chain.
       const data = readJsonFile(
         toNativeAbsolutePath(adjudication.inputs[model].evidencePath),
@@ -552,7 +565,9 @@ function validateDialogueAccounting(
       for (const column of [0, 1]) {
         if (
           row[column + 2] !==
-          (crossVerdicts.get(`${finding.id}:${column}`) ?? "未検出")
+          (reviewers.includes(REVIEWERS[column])
+            ? crossVerdicts.get(`${finding.id}:${column}`) ?? "未検出"
+            : "未選択")
         )
           fail(
             `dialogue cross-check differs from reviewer evidence: ${row[0]}`
@@ -675,6 +690,7 @@ function validateCrossCheck(
   reportFindings,
   reportTreatments,
   handlingCounts,
+  reviewers,
 ) {
   const body = sectionBody(lines, "Claude／Codexクロスチェック").lines;
   const countHeading = body.indexOf("### 最終重要度件数");
@@ -711,10 +727,11 @@ function validateCrossCheck(
       fail("cross-check finding ID does not match the report findings");
     }
     crossChecked.add(cells[0]);
-    if (
-      !reviewerSeverities.has(cells[1]) ||
-      !reviewerSeverities.has(cells[2])
-    ) {
+    if (REVIEWERS.some((reviewer, index) =>
+      reviewers.includes(reviewer)
+        ? !reviewerSeverities.has(cells[index + 1])
+        : cells[index + 1] !== "未選択",
+    )) {
       fail("cross-check reviewer severity is invalid");
     }
     if (!SEVERITIES.includes(cells[3])) {
@@ -768,7 +785,7 @@ function parseSeverityCounts(countLines) {
   return counts;
 }
 
-function validateFindingBlock(block, severity) {
+function validateFindingBlock(block, severity, reviewers) {
   const required = [
     "今回の取扱い",
     "取扱いの根拠",
@@ -805,6 +822,22 @@ function validateFindingBlock(block, severity) {
       fieldValue(block, field, { kind: `${severity} field` }),
     ]),
   );
+  if (reviewers.length === 1) {
+    const reviewerLabel = reviewers[0] === "claude" ? "Claude" : "Codex";
+    if (values.get("検出") !== reviewerLabel) {
+      fail("single-reviewer finding detection must identify the selected reviewer");
+    }
+    if (severity !== "Low") {
+      const verdict = values.get("レビュアー判定").match(
+        /^Claude (Critical|High|Medium|Low|未検出|未選択) \/ Codex (Critical|High|Medium|Low|未検出|未選択) → 最終 (Critical|High|Medium|Low)$/u,
+      );
+      if (!verdict || REVIEWERS.some((reviewer, index) =>
+        (verdict[index + 1] === "未選択") !== !reviewers.includes(reviewer),
+      )) {
+        fail("finding reviewer verdict differs from the selected reviewers");
+      }
+    }
+  }
   if (severity !== "Low") {
     const status = values.get("修正案の評価");
     if (
@@ -870,7 +903,7 @@ function validateFindingBlock(block, severity) {
   };
 }
 
-function validateFindings(lines, tableCounts) {
+function validateFindings(lines, tableCounts, reviewers) {
   const findings = sectionBody(lines, "Findings");
   const headingCounts = new Map();
   const actualCounts = new Map();
@@ -936,7 +969,7 @@ function validateFindings(lines, tableCounts) {
         finding.title = canonicalTitles[0][1].trim();
         assertMeaningfulValue(finding.title, `${severity} canonical finding title`);
       }
-      const treatment = validateFindingBlock(block, severity);
+      const treatment = validateFindingBlock(block, severity, reviewers);
       reportTreatments.set(finding.id, treatment);
       reportFindings.push({
         id: finding.id,
@@ -1082,7 +1115,8 @@ function validateExcludedCandidates(lines) {
   return { phase5Rows, earlierRows };
 }
 
-function reviewerState(canonical) {
+function reviewerState(canonical, selected = true) {
+  if (!selected) return "未選択";
   if (!canonical || canonical.launched === false) return "未起動";
   return canonical.exitCode === 0 ? "成功" : "失敗";
 }
@@ -1359,10 +1393,11 @@ function validatePairStatusDirectory(
 ) {
   assertDirectory(statusDirectory, `${label} directory`);
   const status = readJsonFile(path.join(statusDirectory, "status.json"), label);
+  const reviewers = getEnabledReviewers(context);
   if (
     status.schema !== "deep-review-pair/v6" ||
     status.reviewRunId !== context.reviewRunId ||
-    !isDeepStrictEqual(status.expectedReviewers, ["claude", "codex"]) ||
+    !isDeepStrictEqual(status.expectedReviewers, reviewers) ||
     status.phase !== phase ||
     status.round !== round ||
     !Array.isArray(status.attempts) ||
@@ -1404,46 +1439,34 @@ function validatePairStatusDirectory(
     if (!isDeepStrictEqual(attempt, persistedAttempt)) {
       fail(`${label} attempt history does not match its persisted status`);
     }
-    validateAttemptReviewer(
-      attempt.claude,
-      "claude",
-      attempt.attempt,
-      attemptDirectory,
-      context,
-      phase,
-      round,
-    );
-    validateAttemptReviewer(
-      attempt.codex,
-      "codex",
-      attempt.attempt,
-      attemptDirectory,
-      context,
-      phase,
-      round,
-    );
-    validateResumeSource(
-      status,
-      "claude",
-      attempt,
-      statusDirectory,
-      label,
-    );
-    validateResumeSource(
-      status,
-      "codex",
-      attempt,
-      statusDirectory,
-      label,
-    );
+    for (const reviewer of REVIEWERS) {
+      if (!reviewers.includes(reviewer) && (
+        attempt[reviewer]?.requested !== false ||
+        ["out", "err", "evidence.json"].some((suffix) =>
+          existsSync(path.join(attemptDirectory, `${reviewer}.${suffix}`)),
+        )
+      )) {
+        fail(`${label} unselected ${reviewer} has execution evidence`);
+      }
+      validateAttemptReviewer(
+        attempt[reviewer], reviewer, attempt.attempt, attemptDirectory,
+        context, phase, round,
+      );
+      if (reviewers.includes(reviewer)) {
+        validateResumeSource(status, reviewer, attempt, statusDirectory, label);
+      }
+    }
   }
-  if (
-    status.attempts[0].claude.requested !== true ||
-    status.attempts[0].codex.requested !== true
-  ) {
-    fail(`${label} attempt 1 must request both reviewers`);
+  if (reviewers.some((reviewer) => status.attempts[0][reviewer].requested !== true)) {
+    fail(`${label} attempt 1 must request all selected reviewers`);
   }
-  for (const reviewer of ["claude", "codex"]) {
+  for (const reviewer of REVIEWERS) {
+    if (!reviewers.includes(reviewer)) {
+      if (status.canonical?.[reviewer] != null) {
+        fail(`${label} unselected ${reviewer} has a canonical result`);
+      }
+      continue;
+    }
     const reviewerAttempts = status.attempts.filter(
       (attempt) => attempt[reviewer].requested,
     );
@@ -1486,9 +1509,7 @@ function validatePairStatusDirectory(
       );
     }
   }
-  const complete =
-    status.canonical.claude.exitCode === 0 &&
-    status.canonical.codex.exitCode === 0;
+  const complete = reviewers.every((reviewer) => status.canonical?.[reviewer]?.exitCode === 0);
   if (status.complete !== complete) {
     fail(`${label} has an inconsistent complete flag`);
   }
@@ -1513,7 +1534,7 @@ function validatePrimaryExecution(context, artifactDirectory) {
   const statusRoot = artifactDirectory ?? context.reviewArtifactDir;
   const status = validatePairStatus(statusRoot, context, "primary");
   if (!status.complete) {
-    fail("Phase 2 requires successful canonical results from both reviewers");
+    fail(`Phase 2 requires successful canonical results from ${status.expectedReviewers.length === 2 ? "both reviewers" : "all selected reviewers"}`);
   }
   return status;
 }
@@ -1621,13 +1642,13 @@ function validateRoundStatusArtifacts(roundRows, context, artifactDirectory) {
       "convergence",
       round,
     );
-    const claudeState = reviewerState(status.canonical.claude);
-    const codexState = reviewerState(status.canonical.codex);
+    const claudeState = reviewerState(status.canonical?.claude, status.expectedReviewers.includes("claude"));
+    const codexState = reviewerState(status.canonical?.codex, status.expectedReviewers.includes("codex"));
     if (cells[2] !== claudeState || cells[3] !== codexState) {
       fail(`round ${round} reviewer states do not match status.json`);
     }
     if (!status.complete) {
-      fail(`round ${round} requires successful canonical results from both reviewers`);
+      fail(`round ${round} requires successful canonical results from ${status.expectedReviewers.length === 2 ? "both reviewers" : "all selected reviewers"}`);
     }
     return status;
   });
@@ -1638,6 +1659,7 @@ function validateRoundAndConvergence(
   context,
   artifactDirectory,
   primaryAdjudication,
+  reviewers,
 ) {
   const rounds = sectionBody(lines, "ラウンド別集計").lines;
   requireText(
@@ -1661,7 +1683,17 @@ function validateRoundAndConvergence(
     if (!REVIEWER_STATES.has(cells[2]) || !REVIEWER_STATES.has(cells[3])) {
       fail("round table reviewer state is invalid");
     }
-    for (const column of [4, 5, 6, 7, 8, 9, 10]) {
+    for (const [column, reviewer] of REVIEWERS.entries()) {
+      if ((cells[column + 2] === "未選択") !== !reviewers.includes(reviewer)) {
+        fail("round table reviewer selection differs from the review configuration");
+      }
+      if (!reviewers.includes(reviewer) && cells[column + 4] !== "—") {
+        fail("unselected reviewer new-count must use —");
+      }
+    }
+    for (const column of [4, 5, 6, 7, 8, 9, 10].filter((column) =>
+      column >= 6 || reviewers.includes(REVIEWERS[column - 4]),
+    )) {
       if (!/^\d+$/u.test(cells[column])) {
         fail(`round table column ${column + 1} must be numeric`);
       }
@@ -1683,8 +1715,8 @@ function validateRoundAndConvergence(
         const cells = roundRows[index];
         const summary = adjudication.summary;
         const expected = [
-          String(summary.claudeNew),
-          String(summary.codexNew),
+          summary.claudeNew === null ? "—" : String(summary.claudeNew),
+          summary.codexNew === null ? "—" : String(summary.codexNew),
           String(summary.duplicates),
           String(summary.withdrawn),
           String(summary.downgraded),
@@ -1698,10 +1730,15 @@ function validateRoundAndConvergence(
         return adjudication;
       })
     : roundRows.map((cells) => ({
+        inputs: Object.fromEntries(REVIEWERS.map((reviewer) => [
+          reviewer, reviewers.includes(reviewer) ? {} : null,
+        ])),
         summary: {
-          reviewersSucceeded: cells[2] === "成功" && cells[3] === "成功",
-          claudeNew: Number(cells[4]),
-          codexNew: Number(cells[5]),
+          reviewersSucceeded: REVIEWERS.every((reviewer, column) =>
+            !reviewers.includes(reviewer) || cells[column + 2] === "成功",
+          ),
+          claudeNew: reviewers.includes("claude") ? Number(cells[4]) : null,
+          codexNew: reviewers.includes("codex") ? Number(cells[5]) : null,
           withdrawn: Number(cells[7]),
           downgraded: Number(cells[8]),
           upgraded: Number(cells[9]),
@@ -2180,6 +2217,16 @@ function executionScope(status) {
   return status.phase === "primary" ? "Phase 2" : `round ${status.round}`;
 }
 
+function reportReviewers(lines, context) {
+  if (context) return getEnabledReviewers(context);
+  const body = sectionBody(lines, "実行証跡").lines;
+  const reviewerConfig = Object.fromEntries(REVIEWERS.map((reviewer) => [
+    reviewer,
+    { enabled: fieldValue(body, `${reviewer === "claude" ? "Claude" : "Codex"} reviewer`) !== "未選択" },
+  ]));
+  return getEnabledReviewers({ reviewerConfig });
+}
+
 function expectedRetryResumeFailureTrace(statuses) {
   const events = [];
   for (const status of statuses) {
@@ -2215,6 +2262,7 @@ function validateTrace(
   roundStatuses,
   finalFindingSetSha256,
   handlingSha256,
+  reviewers,
 ) {
   const body = sectionBody(lines, "実行証跡").lines;
   const labels = [
@@ -2240,6 +2288,27 @@ function validateTrace(
       fieldValue(body, label, { kind: "execution trace field" }),
     ]),
   );
+  const primary = values.get("初回review").match(
+    /^Claude\s+(成功|失敗|未起動|未選択)\s*\/\s*Codex\s+(成功|失敗|未起動|未選択)$/u,
+  );
+  if (!primary) fail("execution trace initial review has an invalid format");
+  for (const [index, reviewer] of REVIEWERS.entries()) {
+    const label = `${reviewer === "claude" ? "Claude" : "Codex"} reviewer`;
+    const selected = reviewers.includes(reviewer);
+    if ((values.get(label) === "未選択") !== !selected ||
+        (primary[index + 1] === "未選択") !== !selected) {
+      fail("execution trace reviewer selection does not match the review configuration");
+    }
+    const config = context?.reviewerConfig?.[reviewer];
+    if (selected && config?.model !== undefined) {
+      const expected = reviewer === "claude"
+        ? `Claude Code CLI ${config.model} / effort=${config.effort}`
+        : `Codex CLI ${config.model} / reasoning=${config.reasoningEffort}`;
+      if (values.get(label) !== expected) {
+        fail(`execution trace ${label} does not match the fixed reviewer configuration`);
+      }
+    }
+  }
   if (!/^(?:pr:\d+|branch:.+)$/u.test(values.get("対象"))) {
     fail("execution trace target has an invalid format");
   }
@@ -2309,17 +2378,9 @@ function validateTrace(
       fail("execution trace run-specific report does not match context");
     }
     if (primaryStatus) {
-      const primary = values
-        .get("初回review")
-        .match(
-          /^Claude\s+(成功|失敗|未起動)\s*\/\s*Codex\s+(成功|失敗|未起動)$/u,
-        );
-      if (!primary) {
-        fail("execution trace initial review has an invalid format");
-      }
       const initialStates = {
-        claude: reviewerState(primaryStatus.attempts[0].claude),
-        codex: reviewerState(primaryStatus.attempts[0].codex),
+        claude: reviewerState(primaryStatus.attempts[0].claude, reviewers.includes("claude")),
+        codex: reviewerState(primaryStatus.attempts[0].codex, reviewers.includes("codex")),
       };
       if (
         primary[1] !== initialStates.claude ||
@@ -2348,6 +2409,7 @@ export function validateReviewReport(reportPath, options = {}) {
   const { lines } = layout;
   validateHeader(lines, options.context);
   validateRequiredSections(lines);
+  const reviewers = reportReviewers(lines, options.context);
   assertMeaningfulValue(
     sectionBody(lines, "結論").lines.join("\n"),
     "conclusion",
@@ -2383,7 +2445,7 @@ export function validateReviewReport(reportPath, options = {}) {
   );
   validateConclusionHandlingSummary(lines, handlingCounts);
   const { findings: reportFindings, treatments: reportTreatments } =
-    validateFindings(lines, tableCounts);
+    validateFindings(lines, tableCounts, reviewers);
   validateUserDecisionSummary(lines, reportTreatments);
   const total = reportFindings.length;
   validateCrossCheck(
@@ -2392,6 +2454,7 @@ export function validateReviewReport(reportPath, options = {}) {
     reportFindings,
     reportTreatments,
     handlingCounts,
+    reviewers,
   );
   const excludedCandidateSections = validateExcludedCandidates(lines);
   const primaryStatus = validatePrimaryExecution(
@@ -2407,6 +2470,7 @@ export function validateReviewReport(reportPath, options = {}) {
     options.context,
     options.artifactDirectory,
     primaryAdjudication,
+    reviewers,
   );
   const finalAdjudication = adjudications.at(-1);
   validateEarlierCandidatesAgainstAdjudication(
@@ -2454,6 +2518,7 @@ export function validateReviewReport(reportPath, options = {}) {
     adjudications,
     finalFindingSet,
     reportTreatments,
+    reviewers,
   );
   validatePrComments(
     lines,
@@ -2470,6 +2535,7 @@ export function validateReviewReport(reportPath, options = {}) {
     roundStatuses,
     reportFindingSetSha256,
     finalFindingSet?.handling.sha256 ?? null,
+    reviewers,
   );
   assertMeaningfulValue(
     sectionBody(lines, "未検証事項").lines.join("\n"),

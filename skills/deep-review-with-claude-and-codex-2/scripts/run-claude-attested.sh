@@ -108,6 +108,9 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "ERROR: jq is required but not installed." >&2
   exit 2
 fi
+if ! node "$SCRIPT_DIR/reviewer-selection.mjs" --context "$CONTEXT_PATH" --reviewer claude >/dev/null; then
+  exit 2
+fi
 CLAUDE_REVIEW_MODEL_FIXED=$(jq -er \
   '.reviewerConfig.claude.model | select(type == "string" and length > 0)' \
   "$CONTEXT_PATH") || {

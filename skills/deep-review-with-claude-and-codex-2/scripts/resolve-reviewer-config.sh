@@ -15,10 +15,14 @@ FILE_CLAUDE_REVIEW_MODEL=""
 FILE_CLAUDE_REVIEW_EFFORT=""
 FILE_CODEX_REVIEW_MODEL=""
 FILE_CODEX_REVIEW_REASONING_EFFORT=""
+FILE_CLAUDE_REVIEW_ENABLED=""
+FILE_CODEX_REVIEW_ENABLED=""
 SEEN_CLAUDE_REVIEW_MODEL=0
 SEEN_CLAUDE_REVIEW_EFFORT=0
 SEEN_CODEX_REVIEW_MODEL=0
 SEEN_CODEX_REVIEW_REASONING_EFFORT=0
+SEEN_CLAUDE_REVIEW_ENABLED=0
+SEEN_CODEX_REVIEW_ENABLED=0
 
 fail() {
   printf 'ERROR: reviewer config: %s\n' "$1" >&2
@@ -39,6 +43,14 @@ validate_value() {
     "") fail "$key must be nonempty" ;;
     *[[:space:]]*) fail "$key must not contain whitespace" ;;
   esac
+  case "$key" in
+    CLAUDE_REVIEW_ENABLED|CODEX_REVIEW_ENABLED)
+      case "$value" in
+        true|false) ;;
+        *) fail "$key must be true or false" ;;
+      esac
+      ;;
+  esac
 }
 
 set_file_value() {
@@ -46,6 +58,16 @@ set_file_value() {
   local value="$2"
   validate_value "$key" "$value"
   case "$key" in
+    CLAUDE_REVIEW_ENABLED)
+      [ "$SEEN_CLAUDE_REVIEW_ENABLED" -eq 0 ] || fail "duplicate key: $key"
+      FILE_CLAUDE_REVIEW_ENABLED="$value"
+      SEEN_CLAUDE_REVIEW_ENABLED=1
+      ;;
+    CODEX_REVIEW_ENABLED)
+      [ "$SEEN_CODEX_REVIEW_ENABLED" -eq 0 ] || fail "duplicate key: $key"
+      FILE_CODEX_REVIEW_ENABLED="$value"
+      SEEN_CODEX_REVIEW_ENABLED=1
+      ;;
     CLAUDE_REVIEW_MODEL)
       [ "$SEEN_CLAUDE_REVIEW_MODEL" -eq 0 ] || fail "duplicate key: $key"
       FILE_CLAUDE_REVIEW_MODEL="$value"
@@ -98,64 +120,72 @@ elif [ -n "$CONFIG_FILE_EXPLICIT" ]; then
   fail "explicit config file does not exist: $CONFIG_FILE_EXPLICIT"
 fi
 
-if [ -n "${CLAUDE_REVIEW_MODEL:-}" ]; then
-  CLAUDE_REVIEW_MODEL_RESOLVED="$CLAUDE_REVIEW_MODEL"
-  CLAUDE_REVIEW_MODEL_SOURCE="environment"
-elif [ -n "$FILE_CLAUDE_REVIEW_MODEL" ]; then
-  CLAUDE_REVIEW_MODEL_RESOLVED="$FILE_CLAUDE_REVIEW_MODEL"
-  CLAUDE_REVIEW_MODEL_SOURCE="config-file"
-else
-  fail "CLAUDE_REVIEW_MODEL is not configured"
-fi
+resolve_enabled() {
+  local key="$1"
+  local file_key="FILE_$1"
+  local resolved source
+  if [ -n "${!key:-}" ]; then
+    resolved="${!key}"
+    source="environment"
+  elif [ -n "${!file_key}" ]; then
+    resolved="${!file_key}"
+    source="config-file"
+  else
+    resolved=true
+    source="default"
+  fi
+  validate_value "$key" "$resolved"
+  printf -v "${key}_RESOLVED" '%s' "$resolved"
+  printf -v "${key}_SOURCE" '%s' "$source"
+}
 
-if [ -n "${CLAUDE_REVIEW_EFFORT:-}" ]; then
-  CLAUDE_REVIEW_EFFORT_RESOLVED="$CLAUDE_REVIEW_EFFORT"
-  CLAUDE_REVIEW_EFFORT_SOURCE="environment"
-elif [ -n "$FILE_CLAUDE_REVIEW_EFFORT" ]; then
-  CLAUDE_REVIEW_EFFORT_RESOLVED="$FILE_CLAUDE_REVIEW_EFFORT"
-  CLAUDE_REVIEW_EFFORT_SOURCE="config-file"
-else
-  fail "CLAUDE_REVIEW_EFFORT is not configured"
-fi
+resolve_value() {
+  local key="$1"
+  local enabled="$2"
+  local file_key="FILE_$1"
+  local resolved="" source=""
+  if [ -n "${!key:-}" ]; then
+    resolved="${!key}"
+    source="environment"
+  elif [ -n "${!file_key}" ]; then
+    resolved="${!file_key}"
+    source="config-file"
+  elif [ "$enabled" = true ]; then
+    fail "$key is not configured"
+  fi
+  if [ -n "$resolved" ]; then validate_value "$key" "$resolved"; fi
+  printf -v "${key}_RESOLVED" '%s' "$resolved"
+  printf -v "${key}_SOURCE" '%s' "$source"
+}
 
-if [ -n "${CODEX_REVIEW_MODEL:-}" ]; then
-  CODEX_REVIEW_MODEL_RESOLVED="$CODEX_REVIEW_MODEL"
-  CODEX_REVIEW_MODEL_SOURCE="environment"
-elif [ -n "$FILE_CODEX_REVIEW_MODEL" ]; then
-  CODEX_REVIEW_MODEL_RESOLVED="$FILE_CODEX_REVIEW_MODEL"
-  CODEX_REVIEW_MODEL_SOURCE="config-file"
-else
-  fail "CODEX_REVIEW_MODEL is not configured"
+resolve_enabled CLAUDE_REVIEW_ENABLED
+resolve_enabled CODEX_REVIEW_ENABLED
+if [ "$CLAUDE_REVIEW_ENABLED_RESOLVED" = false ] && [ "$CODEX_REVIEW_ENABLED_RESOLVED" = false ]; then
+  fail "at least one reviewer must be enabled"
 fi
-
-if [ -n "${CODEX_REVIEW_REASONING_EFFORT:-}" ]; then
-  CODEX_REVIEW_REASONING_EFFORT_RESOLVED="$CODEX_REVIEW_REASONING_EFFORT"
-  CODEX_REVIEW_REASONING_EFFORT_SOURCE="environment"
-elif [ -n "$FILE_CODEX_REVIEW_REASONING_EFFORT" ]; then
-  CODEX_REVIEW_REASONING_EFFORT_RESOLVED="$FILE_CODEX_REVIEW_REASONING_EFFORT"
-  CODEX_REVIEW_REASONING_EFFORT_SOURCE="config-file"
-else
-  fail "CODEX_REVIEW_REASONING_EFFORT is not configured"
-fi
-
-validate_value CLAUDE_REVIEW_MODEL "$CLAUDE_REVIEW_MODEL_RESOLVED"
-validate_value CLAUDE_REVIEW_EFFORT "$CLAUDE_REVIEW_EFFORT_RESOLVED"
-validate_value CODEX_REVIEW_MODEL "$CODEX_REVIEW_MODEL_RESOLVED"
-validate_value CODEX_REVIEW_REASONING_EFFORT "$CODEX_REVIEW_REASONING_EFFORT_RESOLVED"
+resolve_value CLAUDE_REVIEW_MODEL "$CLAUDE_REVIEW_ENABLED_RESOLVED"
+resolve_value CLAUDE_REVIEW_EFFORT "$CLAUDE_REVIEW_ENABLED_RESOLVED"
+resolve_value CODEX_REVIEW_MODEL "$CODEX_REVIEW_ENABLED_RESOLVED"
+resolve_value CODEX_REVIEW_REASONING_EFFORT "$CODEX_REVIEW_ENABLED_RESOLVED"
 
 jq -n \
+  --argjson claudeEnabled "$CLAUDE_REVIEW_ENABLED_RESOLVED" \
+  --argjson codexEnabled "$CODEX_REVIEW_ENABLED_RESOLVED" \
   --arg claudeModel "$CLAUDE_REVIEW_MODEL_RESOLVED" \
   --arg claudeEffort "$CLAUDE_REVIEW_EFFORT_RESOLVED" \
   --arg codexModel "$CODEX_REVIEW_MODEL_RESOLVED" \
   --arg codexEffort "$CODEX_REVIEW_REASONING_EFFORT_RESOLVED" \
+  --arg claudeEnabledSource "$CLAUDE_REVIEW_ENABLED_SOURCE" \
+  --arg codexEnabledSource "$CODEX_REVIEW_ENABLED_SOURCE" \
   --arg claudeModelSource "$CLAUDE_REVIEW_MODEL_SOURCE" \
   --arg claudeEffortSource "$CLAUDE_REVIEW_EFFORT_SOURCE" \
   --arg codexModelSource "$CODEX_REVIEW_MODEL_SOURCE" \
   --arg codexEffortSource "$CODEX_REVIEW_REASONING_EFFORT_SOURCE" \
-  '{reviewerConfig:{
-      claude:{model:$claudeModel,effort:$claudeEffort},
-      codex:{model:$codexModel,reasoningEffort:$codexEffort}
+  'def optional: if . == "" then null else . end;
+    {reviewerConfig:{
+      claude:{enabled:$claudeEnabled,model:($claudeModel|optional),effort:($claudeEffort|optional)},
+      codex:{enabled:$codexEnabled,model:($codexModel|optional),reasoningEffort:($codexEffort|optional)}
     },reviewerConfigSources:{
-      claude:{model:$claudeModelSource,effort:$claudeEffortSource},
-      codex:{model:$codexModelSource,reasoningEffort:$codexEffortSource}
+      claude:{enabled:$claudeEnabledSource,model:($claudeModelSource|optional),effort:($claudeEffortSource|optional)},
+      codex:{enabled:$codexEnabledSource,model:($codexModelSource|optional),reasoningEffort:($codexEffortSource|optional)}
     }}'

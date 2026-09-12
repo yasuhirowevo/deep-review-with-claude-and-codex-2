@@ -10,6 +10,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { toNativeAbsolutePath } from "./path-interop.mjs";
+import {
+  assertReviewerEnabled,
+  getEnabledReviewers,
+  validateReviewerConfiguration,
+} from "./reviewer-selection.mjs";
 
 const PAIR_OPTIONS = new Set([
   "--context",
@@ -139,31 +144,6 @@ function requiredString(object, key) {
   return value;
 }
 
-function requiredReviewerConfig(context) {
-  const config = context.reviewerConfig;
-  if (!config || typeof config !== "object" || Array.isArray(config)) {
-    fail("context.reviewerConfig must be an object");
-  }
-  const claude = config.claude;
-  const codex = config.codex;
-  if (!claude || typeof claude !== "object" || Array.isArray(claude)) {
-    fail("context.reviewerConfig.claude must be an object");
-  }
-  if (!codex || typeof codex !== "object" || Array.isArray(codex)) {
-    fail("context.reviewerConfig.codex must be an object");
-  }
-  return {
-    claude: {
-      model: requiredString(claude, "model"),
-      effort: requiredString(claude, "effort"),
-    },
-    codex: {
-      model: requiredString(codex, "model"),
-      reasoningEffort: requiredString(codex, "reasoningEffort"),
-    },
-  };
-}
-
 function assertOwnedEntry(input, kind, label, expectedMode = null) {
   const stat = lstatSync(input);
   if (stat.isSymbolicLink()) fail(`${label} must not be a symlink`);
@@ -268,11 +248,12 @@ function assertRunnerContext(options, canonicalContext) {
   }
 }
 
-function assertPair(options, canonicalContext, runRoot, artifactDir) {
-  requireOptions(options, ["--context", "--phase", "--reviewer", "--attempt"]);
+function assertPair(options, context, canonicalContext, runRoot, artifactDir) {
+  requireOptions(options, ["--context", "--phase", "--attempt"]);
   assertRunnerContext(options, canonicalContext);
   const phase = options.get("--phase");
-  const reviewer = options.get("--reviewer");
+  const enabled = getEnabledReviewers(context);
+  const reviewer = options.get("--reviewer") ?? (enabled.length === 2 ? "both" : enabled[0]);
   const attempt = options.get("--attempt");
   const round = options.get("--round");
   if (!new Set(["primary", "convergence"]).has(phase)) {
@@ -282,8 +263,10 @@ function assertPair(options, canonicalContext, runRoot, artifactDir) {
     fail("--reviewer must be both, claude, or codex");
   }
   if (!/^[1-9][0-9]*$/u.test(attempt)) fail("--attempt must be positive");
-  if (attempt === "1" && reviewer !== "both") {
-    fail("attempt 1 must launch both reviewers");
+  const requested = reviewer === "both" ? ["claude", "codex"] : [reviewer];
+  for (const selected of requested) assertReviewerEnabled(context, selected);
+  if (attempt === "1" && requested.length !== enabled.length) {
+    fail("attempt 1 must launch all enabled reviewers");
   }
   if (phase === "primary" && round) fail("primary must not specify --round");
   if (phase === "convergence" && (!round || !/^[1-9][0-9]*$/u.test(round) || Number(round) > 20)) {
@@ -327,17 +310,13 @@ function assertPair(options, canonicalContext, runRoot, artifactDir) {
   }
 }
 
-function assertWave(options, canonicalContext, runRoot) {
-  const required = [
-    "--context",
-    "--first-round",
-    "--claude-lead-prompt",
-    "--codex-lead-prompt",
-    "--claude-speculative-prompt",
-    "--codex-speculative-prompt",
-  ];
+function assertWave(options, context, canonicalContext, runRoot) {
+  const required = ["--context", "--first-round"];
+  for (const reviewer of getEnabledReviewers(context)) {
+    required.push(`--${reviewer}-lead-prompt`, `--${reviewer}-speculative-prompt`);
+  }
   requireOptions(options, required);
-  if (options.size !== required.length) fail("wave runner received extra options");
+  if (options.size !== required.length) fail("wave runner received prompts for a disabled reviewer or extra options");
   assertRunnerContext(options, canonicalContext);
   const round = options.get("--first-round");
   if (!/^[1-9][0-9]*$/u.test(round) || Number(round) > 19) {
@@ -366,6 +345,7 @@ function assertOutputPath(input, artifactDir, basename, label) {
 }
 
 function assertClaudeFollowup(options, context, canonicalContext, runRoot, artifactDir, stdoutPath, stderrPath) {
+  assertReviewerEnabled(context, "claude");
   const required = [...CLAUDE_FOLLOWUP_OPTIONS];
   requireOptions(options, required);
   if (options.size !== required.length) fail("Claude follow-up runner received extra options");
@@ -417,9 +397,9 @@ try {
   }
 
   if (parsed.mode === "pair") {
-    assertPair(parsed.options, canonicalContext, runRoot, artifactDir);
+    assertPair(parsed.options, context, canonicalContext, runRoot, artifactDir);
   } else if (parsed.mode === "wave") {
-    assertWave(parsed.options, canonicalContext, runRoot);
+    assertWave(parsed.options, context, canonicalContext, runRoot);
   } else {
     assertClaudeFollowup(
       parsed.options,
@@ -453,7 +433,7 @@ try {
       skillDir,
       toolingDigest,
       runnerPath,
-      reviewerConfig: requiredReviewerConfig(context),
+      ...validateReviewerConfiguration(context),
     })}\n`,
   );
 } catch (error) {
