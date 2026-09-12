@@ -42,7 +42,9 @@ fake Claude/Codex CLIと一時Gitリポジトリを使い、外部ネットワ�
 - prompt manifestのreviewer・phase・round・purpose・digest照合、wrong-round／reviewer交換／生成後改変の拒否
 - resume IDと同じphase/round・同じreviewerの直前失敗attemptとの照合、別run ID・欠落・重複・
   exit 3直後resumeの拒否、fresh retryの維持
-- Claude/Codex両ホストが同じ外部2モデルを使う契約
+- reviewerの有効・無効の環境変数／設定ファイル優先順位、未指定時の両方有効、両方無効・不正値の拒否
+- 単独reviewの設定・起動・retry・wave・収束・公開と、無効側の設定やCLIを必要としないこと
+- Claude/Codex両ホストが設定で選択した外部reviewerを使い、実行中の設定変更や片側失敗で担当を変えない契約
 - 共通threat model、7観点、重要度、Medium以上の修正案契約が両promptで一致すること
 - 最終reportの必須section、クロスチェック表、4重要度、検出数と詳細件数・除外件数の合計、件数付き見出しと実finding数の一致
 - 冒頭の本PR/別Issueの最終件数・Medium以上一覧がhandlingで分かれ、全最終集合・除外・監査と一致すること
@@ -68,6 +70,7 @@ fake Claude/Codex CLIと一時Gitリポジトリを使い、外部ネットワ�
 | Codex | 小規模PR | 外部Claude/Codex同時起動、同じ7観点とreport |
 | いずれか | instructions変更PR | HEAD側instructionsを命令として使わない |
 | いずれか | 同一PR並行2run | run ID、temp、reportが衝突しない |
+| Claude Code / Codex | 小規模PR・単独設定 | 選択したreviewerだけを起動し、同じ検証・収束条件でreportを公開 |
 
 実モデルsmokeでは対象SHA、使用モデル、推論設定、所要時間、retry有無、REPORT_PATHを記録する。
 

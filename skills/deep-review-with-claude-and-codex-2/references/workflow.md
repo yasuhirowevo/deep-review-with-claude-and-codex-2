@@ -68,9 +68,9 @@ bash <installed-skill>/scripts/prepare-review-run.sh \
 - HEADのread-only file snapshot
 - BASE commitから抽出したbounded project guidance
 - run固有temp、prompt、artifact名前空間
-- 継承環境、reviewer設定ファイルの順で解決したClaude/Codexのモデル・推論設定と取得元
+- 継承環境、reviewer設定ファイル、既定値の順で解決したreviewerの有効・無効、モデル・推論設定と取得元
 
-prepareは解決した4値と取得元をstderrへ表示する。意図した設定と異なる場合は外部reviewerを
+prepareは解決したreviewer設定をstderrへ表示する。意図した設定と異なる場合は外部reviewerを
 起動せず、環境変数または設定ファイルを修正して新しいrunを準備する。
 
 `controlPathsChanged`が非空なら、対象HEADのinstructionsや設定をレビュー証拠として調べるが、
@@ -103,7 +103,7 @@ PRモードではpreflightが固定した初期PR contextを使い、PRコメン
 - 不明点・保守的仮定: <なし、または内容>
 ```
 
-同じファイルをClaude/Codex双方と全fresh収束roundのprompt生成へ渡す。reviewerごと、roundごとに
+同じファイルを選択したreviewerと全fresh収束roundのprompt生成へ渡す。reviewerごと、roundごとに
 別のthreat modelを作らない。
 
 ## Phase 2: 独立した初回レビュー
@@ -145,10 +145,11 @@ RESTはpage、GraphQLはcursorを1ページずつ明示して取得し、1 sourc
 timeout、上限到達、pagination不完全のいずれかでは、未取得source・page・rangeを記録して
 `status=not-checked`とし、取得済みの一部を除外判断へ使わない。
 
-### 2. 両promptを結果を見る前に固定する
+### 2. 選択した全promptを結果を見る前に固定する
 
-contextの`skillDir`にあるprompt builderを2回実行し、内容が同一の
-Claude用・Codex用templateをrun rootへ別ファイルで作る。
+contextの`skillDir`にある`reviewer-selection.mjs --context <CONTEXT>`で有効なreviewerを取得し、
+各reviewerのprompt builderを実行してtemplateをrun rootへ別ファイルで作る。
+以下は両方有効な例であり、単独の場合は有効側のコマンドだけを実行する。
 
 ```bash
 node <skillDir>/scripts/build-review-prompt.mjs \
@@ -162,7 +163,7 @@ node <skillDir>/scripts/build-review-prompt.mjs \
 ```
 
 prompt builderはrun固有toolingの[review-quality-contract.md](review-quality-contract.md)全文と
-同じthreat modelを両promptへ埋め込む。7観点、重要度、Medium以上の根拠・修正案契約を
+同じthreat modelを各promptへ埋め込む。7観点、重要度、Medium以上の根拠・修正案契約を
 reviewer別に要約・変更しない。各`--output`の隣に`<output>.manifest.json`を生成し、
 review run ID、reviewer、phase、round、purpose、prompt path/digestを固定する。
 
@@ -174,14 +175,16 @@ bash <skillDir>/scripts/verify-review-run.sh <CONTEXT>
 
 検証に失敗したら、その入力を使わず停止する。
 
-### 4. 外部CLIを同時起動する
+### 4. 選択した外部CLIを起動する
 
 [host-adapters.md](host-adapters.md)の外側timeout契約を適用する。
 Claude Codeホストではpair runnerを起動するBash toolへ`timeout: 1050000`を指定する。
 Codexホストでは[外側sandbox契約](host-adapters.md#codexホストの外側sandbox契約)に従い、
 初回から権限昇格付きでexecを発行し、継続中のsessionを返したら同じsessionを完了まで待つ。
-pair runnerは両promptがすでに固定されていることを前提に、入力integrityを検証してから
-manifestの割当とprompt digestを照合し、入力integrityを検証してからClaude/Codex runnerを同時起動する。
+pair runnerは選択した全promptがすでに固定されていることを前提に、入力integrity、
+manifestの割当とprompt digestを照合してから起動する。両方有効ならClaude/Codex runnerを同時起動する。
+以下は両方有効な例である。単独の場合は有効側のprompt引数だけを渡し、`--reviewer`をその担当名にする。
+`--reviewer`を省略した場合はcontextの選択を使う。初回attemptは選択した全reviewerの起動を必須とする。
 
 ```bash
 bash <reviewerLauncherPathのcanonical絶対値> --context <CONTEXT> --mode pair -- \
@@ -205,17 +208,17 @@ pair runnerは`reviewArtifactDir/phase2/`へ次を分離して保存する。
 attempt statusは`deep-review-attempt/v4`で、モデルごとに使用したprompt manifest receipt、
 成功時のoutput evidence receipt、resume時の`resumedFromAttempt`も保持する。
 phase単位の`status.json`は`deep-review-pair/v6`であり、review run ID、
-期待reviewer（Claude/Codex）、全attempt履歴を保持してattemptを上書きしない。
+期待reviewer（contextで選択した集合）、全attempt履歴を保持してattemptを上書きしない。
 モデルごとに終了code 0の最新attemptを正典とし、成功attemptが無ければ最新の失敗attemptを正典とする。
 pair runnerの終了codeは正典結果に実行基盤エラーが残る場合を優先して`3`、
-両成功が`0`、片方の通常失敗が`20`、両方の通常失敗が`21`である。
+選択した全reviewerの成功が`0`、1者の通常失敗が`20`、2者の通常失敗が`21`である。
 片方失敗でも成功側の出力を保持し、失敗側だけを後述の規則でretryまたはresumeする。
-外側timeoutやcancelで`INT`/`TERM`を受けた場合も両childの終了を待ち、
+外側timeoutやcancelで`INT`/`TERM`を受けた場合も起動した全childの終了を待ち、
 当該attemptへ`interrupted: true`とモデル別状態を保存し、phase単位の`status.json`を
 原子的に再構成してから終了する。割込み時も終了code 0のreviewerはoutput evidenceを
 確定してから成功として保存し、evidence生成に失敗した場合は非0へ正規化する。
 evidence生成は内部watchdogで既定15秒、`OUTPUT_EVIDENCE_TIMEOUT_SECONDS`により1〜30秒へ制限する。
-両reviewerの成功出力にはID、固定入力の各値、`INPUT_ATTESTATION: verified`、区切り線、本文が含まれる。
+選択したreviewerの成功出力にはID、固定入力の各値、`INPUT_ATTESTATION: verified`、区切り線、本文が含まれる。
 `verify-review-run.sh`が担当するのはtooling・diff・snapshot・BASE guidanceという入力側の
 integrityである。receipt、challenge、diff probe、本文契約という出力側のattestationは、
 `run-claude-attested.sh`と`run-codex.sh`が内部verifierを通して検証する。
@@ -269,8 +272,8 @@ Codexは`--codex-prompt <codex-prompt> --reviewer codex`へ置き換え、resume
 `--reviewer both`、モデルごとのresume IDを1回の呼出しへ渡して同時起動する。
 同じphase/roundへ複数のpair runnerを同時起動せず、attempt番号を必ず連続させる。
 pair runnerはモデルごとの初回＋最大1回という上限をstatus履歴から検証し、成功側を再実行しない。
-片方または両方がretry/resume後も失敗した場合は、成功側の出力と全attempt証跡を保持したまま
-runを未完了として停止する。単独モデルでPhase 3や次roundへ進まず、完成reportをpublishしない。
+選択したreviewerがretry/resume後も失敗した場合は、成功側の出力と全attempt証跡を保持したまま
+runを未完了として停止する。失敗した担当を選択から外してPhase 3や次roundへ進まず、完成reportをpublishしない。
 停止時は失敗モデル、phase/round、attempt、確認できたerror evidenceを示し、証拠から判断できる
 原因と具体的な解決手順を案内する。原因を確定できない場合は未確定と明記し、解決後に同じ固定HEADを
 新しいrunで再実行するよう案内する。
@@ -285,7 +288,7 @@ toolの既定timeoutへ依存しない。この契約はretry、resume、follow-
 ## Phase 3: ファクトチェックとクロスチェック
 
 各出力の採用直前に`verify-review-run.sh`を再実行する。その後オーケストレーターが、
-両結果を互いに独立した候補集合として扱い、HEAD snapshotの実コードで確認する。
+各結果を独立した候補集合として扱い、HEAD snapshotの実コードで確認する。
 pair runnerは成功した正典stdoutごとに`<reviewer>.evidence.json`を作り、stdout全体のSHA-256と
 reviewerローカル候補ID（`claude-F001` / `codex-F001`形式）をstatusへ固定する。
 
@@ -325,6 +328,7 @@ node <skillDir>/scripts/review-adjudication.mjs \
 ```
 
 クロスチェックではClaude重要度、Codex重要度、最終重要度、今回の取扱い、短い訂正理由を保持する。
+無効なreviewerの重要度は「未選択」とし、有効側の出力に候補がなかった「未検出」と区別する。
 最終レポートでは3つの重要度をクロスチェック表へ、取扱いと訂正理由を各指摘の詳細へ記載する。
 片方だけの検出を理由に自動降格せず、security分類だけを理由に自動昇格しない。
 Medium以上の最終findingは、[review-quality-contract.md](review-quality-contract.md)に定義した
@@ -340,7 +344,7 @@ Phase 5の取扱いを`additional-verification`とし、確認結果で変わる
 修正コストやPR対象外という理由だけで重要度を下げず、修正案の評価・今回の取扱いで区別する。
 Phase 5の既存判断による除外とは区別し、裁定時の棄却・撤回も監査記録へ残す。
 
-曖昧な一点だけを同じCLIへ確認する場合は、新しいpromptを作り
+曖昧な一点だけを有効なreviewerの同じCLIへ確認する場合は、新しいpromptを作り
 `--result-contract followup`と既存session/thread IDを使う。
 follow-upを通常reviewやfresh収束の代用にしない。
 follow-upはreview attemptではないためpairの正典結果を更新しない。出力は
@@ -393,8 +397,9 @@ bash <codexLauncherPath> \
 
 ## Phase 4: Fresh収束
 
-初回findingやPRコメントを渡さず、次の正典round `N`と後続投機round `N+1`の4promptを、
+初回findingやPRコメントを渡さず、次の正典round `N`と後続投機round `N+1`の選択reviewerのpromptを、
 どのreviewer出力も読む前に生成する。`N+1`は20を超えてはならない。
+以下は両方有効な例である。単独の場合は各roundの有効側だけを生成し、2promptを固定する。
 
 ```bash
 node <skillDir>/scripts/build-review-prompt.mjs \
@@ -419,9 +424,9 @@ node <skillDir>/scripts/build-review-prompt.mjs \
   --output <reviewRunRoot>/codex-prompts/codex-round-<N+1>.md
 ```
 
-4promptのmanifestが固定された後、`run-review-wave.sh`をwave supervisor専用の
+選択したreviewerの2round分のmanifestが固定された後、`run-review-wave.sh`をwave supervisor専用の
 `timeout: 2400000`で起動する。各pairと別processで行うretry/resumeは`timeout: 1050000`とする。
-wave runnerは`N`と`N+1`を同じrunへ原子的に予約し、各roundでClaude/Codexをpair起動する。
+wave runnerは`N`と`N+1`を同じrunへ原子的に予約し、各roundで選択したreviewerをpair runnerから起動する。
 `N`は通常の`phase4/round-<N>/`、`N+1`は
 `phase4/waves/wave-<N>-<N+1>/speculative-round-<N+1>/`へ分離する。
 wave statusは両pair runnerのPID・開始/終了時刻・exit status・signalに加え、各attemptのstdout/stderrの
@@ -477,13 +482,14 @@ bash <reviewerLauncherPathのcanonical絶対値> --context <CONTEXT> --mode wave
   --codex-speculative-prompt <codex-round-N+1-prompt>
 ```
 
+上記のwave起動例は両方有効な場合を示す。単独の場合は有効側の`lead`と`speculative`のprompt引数だけを渡す。
 Codexホストでは継続中のexec sessionを保持し、Claude Codeホストではbackground Bashとして保持する。
 `WAVE_LEAD_READY`が出たら、wave sessionを終了させずにround `N`だけを処理する。
 round `N`の片側が失敗した場合は、wave statusの`lead`を指定して現在と同じretry/resumeを行う。
 現在失敗中の全reviewerがretry/resume後も失敗した場合だけ、`--action prior-failure`で
 投機roundを中断し、未完了として停止する。一方だけを先に再試行した場合、未試行の失敗reviewerが
 retry可能な間は`prior-failure`を固定しない。
-retry/resumeで両reviewerが正典成功へ回復した場合、継続中のwave sessionも成功終了する。
+retry/resumeで選択した全reviewerが正典成功へ回復した場合、継続中のwave sessionも成功終了する。
 失敗したreviewerごとに対応するprompt引数を渡し、次の3パターンを使い分ける。
 
 Claudeだけをretry/resumeする場合:
@@ -520,7 +526,7 @@ bash <reviewerLauncherPathのcanonical絶対値> --context <CONTEXT> --mode pair
   --wave-status <wave-status.json> --wave-role lead
 ```
 
-round `N`の正典結果が両方成功したら、その出力だけを実コードで確認する。後続投機roundのstdout、
+round `N`の選択した全reviewerの正典結果が成功したら、その出力だけを実コードで確認する。後続投機roundのstdout、
 stderr、evidence、status本文はこの時点で読まない。新規finding、重複、撤回、降格、昇格、据置、
 round前後の最終集合の変化を集計し、全候補の`decisions`、前roundの全findingに対する`changes`、
 round後の`after`をdraftへ記録する。`changes[].action`は`unchanged`、`withdrawn`、`downgraded`、
@@ -574,8 +580,8 @@ fresh reviewerへ既存findingを渡さず、比較・統合はオーケスト�
 
 `adjudication.json`のsummaryはscriptが候補判定と前後集合から導出する。round表を手計算せず、
 このsummaryを転記する。`rejected`は「除外・撤回・降格した候補」へ根拠を残すが、重複件数には含めない。
-round表には`status.json`の正典attemptから求めたClaude/Codexそれぞれの`成功`、`失敗`、`未起動`を
-記録する。公開時にpublisherが正典化した`phase4/round-*`の全一覧とround表を完全一致させ、
+round表には`status.json`の正典attemptから求めた有効reviewerの`成功`、`失敗`、`未起動`を
+記録する。無効側の状態は`未選択`、候補数と新規件数は`—`とする。公開時にpublisherが正典化した`phase4/round-*`の全一覧とround表を完全一致させ、
 各roundのstatus、attempt履歴、正典stdout、入力attestationを同じrunへ再結合する。
 wave status、投機元artifact、promotion receipt、中断signalも検証し、非正典出力の裁定・report混入を拒否する。
 
@@ -584,11 +590,11 @@ fresh出力が既存findingを再検出しなかったことだけを撤回根�
 同じ前提・根拠の候補が再検出された場合は、既存の裁定根拠を再利用できる。新しい根拠や反証が
 追加された場合は採否を見直す。再検出だけを理由に同じ調査を繰り返さず、同じ採否理由も各候補へ記録する。
 
-- 両モデルとも実質新規0件で、撤回・降格・昇格がなく、最終集合が変化しないroundを
+- 選択した全reviewerが実質新規0件で、撤回・降格・昇格がなく、最終集合が変化しないroundを
   連続2回確認したら終了する。
 - 最大20roundで終了し、未収束ならその事実をreportへ残す。
 - 1〜19roundで収束条件を満たさず中止した場合は完成reportをpublishせず、未完了としてユーザーへ報告する。
-- 片方または両方がretry/resume後も失敗した正典roundでは未完了として停止し、0件roundとして数えず、
+- 選択したreviewerがretry/resume後も失敗した正典roundでは未完了として停止し、0件roundとして数えず、
   `--action prior-failure`で後続投機roundを中断する。
 
 wave reservationは先行roundの`attempt 1`を開始する前にround 1から直前roundまでの
@@ -729,7 +735,7 @@ resumeについては`resumedFromAttempt`、直前失敗attemptのstdout、そ�
 さらに、各正典stdoutのdigestと候補一覧、全候補の判定、adjudicationの連鎖、round表の導出値、
 Phase 5の全finding判断と最終集合、レポートfindingのID・重要度・題名、
 実行証跡の最終集合digestを再計算する。Phase 2と全roundの正典結果が
-Claude/Codexとも成功していることを必須とし、末尾2roundが
+contextで選択した全reviewerが成功していることを必須とし、末尾2roundが
 連続して安定した収束report、または20round完了済みの未収束reportだけを受理し、
 1〜19roundで終了条件未達のreportは拒否する。
 PRモードでは初期`pr-review-context.json`と最終`phase5/pr-review-context.json`のrole、

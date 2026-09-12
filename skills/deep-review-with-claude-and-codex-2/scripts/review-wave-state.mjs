@@ -30,6 +30,10 @@ import {
 } from "./path-interop.mjs";
 import { reviewPairExitCode } from "./review-pair-policy.mjs";
 import { verifyPromptManifest } from "./review-prompt-manifest.mjs";
+import {
+  getAdjudicationReviewers,
+  getEnabledReviewers,
+} from "./reviewer-selection.mjs";
 
 const SCHEMA = "deep-review-wave/v1";
 const LOCK_SCHEMA = "deep-review-wave-lock/v1";
@@ -262,6 +266,7 @@ function acquireLock(statusPath) {
 function loadContext(contextPath) {
   const contextReal = assertRegularFile(contextPath, "review context", true);
   const context = readJson(contextReal, "review context");
+  getEnabledReviewers(context);
   if (
     typeof context.reviewRunId !== "string" ||
     context.reviewRunId.length === 0 ||
@@ -349,12 +354,14 @@ export function authorizeSequentialPhase4({ contextPath, round }) {
     phase4Directory: loaded.phase4Directory,
     reviewRunId: loaded.context.reviewRunId,
     nextRound: normalizedRound,
+    context: loaded.context,
   });
   claimPhase4Mode(loaded, "sequential");
   assertCanStartRound({
     phase4Directory: loaded.phase4Directory,
     reviewRunId: loaded.context.reviewRunId,
     nextRound: normalizedRound,
+    context: loaded.context,
   });
   return {
     reviewRunId: loaded.context.reviewRunId,
@@ -364,9 +371,12 @@ export function authorizeSequentialPhase4({ contextPath, round }) {
 }
 
 function validateWaveIdentity(status, context, statusPath, phase4Real) {
+  const enabledReviewers = getEnabledReviewers(context);
   if (
     status?.schema !== SCHEMA ||
     status.reviewRunId !== context.reviewRunId ||
+    JSON.stringify(status.expectedReviewers ?? ["claude", "codex"]) !==
+      JSON.stringify(enabledReviewers) ||
     !Number.isInteger(status.revision) ||
     status.revision < 1 ||
     !Number.isInteger(status.firstRound) ||
@@ -433,6 +443,11 @@ function validateWaveIdentity(status, context, statusPath, phase4Real) {
     fail("wave artifact paths do not match the reserved rounds");
   }
   for (const record of [status.lead, status.speculative]) {
+    if (
+      JSON.stringify(recordReviewers(record)) !== JSON.stringify(enabledReviewers)
+    ) {
+      fail("wave prompt reviewers do not match the fixed reviewer selection");
+    }
     if (
       !record.process ||
       (record.process.pid !== null && typeof record.process.pid !== "number") ||
@@ -643,6 +658,12 @@ function verifyWavePrompt(context, promptPath, reviewer, round) {
   });
 }
 
+function recordReviewers(record) {
+  return Object.keys(record.prompts ?? {}).filter(
+    (reviewer) => record.prompts[reviewer] !== null,
+  );
+}
+
 export function reserveWave({
   contextPath,
   firstRound,
@@ -689,38 +710,26 @@ export function reserveWave({
       phase4Directory,
       reviewRunId: context.reviewRunId,
       nextRound: normalizedFirst,
+      context,
     });
   }
-  const promptReceipts = {
-    lead: {
-      claude: verifyWavePrompt(
-        context,
-        claudeLeadPrompt,
-        "claude",
-        normalizedFirst,
-      ),
-      codex: verifyWavePrompt(
-        context,
-        codexLeadPrompt,
-        "codex",
-        normalizedFirst,
-      ),
-    },
-    speculative: {
-      claude: verifyWavePrompt(
-        context,
-        claudeSpeculativePrompt,
-        "claude",
-        speculativeRound,
-      ),
-      codex: verifyWavePrompt(
-        context,
-        codexSpeculativePrompt,
-        "codex",
-        speculativeRound,
-      ),
-    },
+  const enabledReviewers = getEnabledReviewers(context);
+  const promptPaths = {
+    lead: { claude: claudeLeadPrompt, codex: codexLeadPrompt },
+    speculative: { claude: claudeSpeculativePrompt, codex: codexSpeculativePrompt },
   };
+  const promptReceipts = {};
+  for (const [role, round] of [
+    ["lead", normalizedFirst],
+    ["speculative", speculativeRound],
+  ]) {
+    promptReceipts[role] = Object.fromEntries(enabledReviewers.map(
+      (reviewer) => [
+        reviewer,
+        verifyWavePrompt(context, promptPaths[role][reviewer], reviewer, round),
+      ],
+    ));
+  }
 
   const priorWaves = inspectReviewWaves({
     context,
@@ -799,6 +808,7 @@ export function reserveWave({
   const status = {
     schema: SCHEMA,
     reviewRunId: context.reviewRunId,
+    expectedReviewers: enabledReviewers,
     revision: 1,
     firstRound: normalizedFirst,
     speculativeRound,
@@ -874,7 +884,10 @@ export function authorizeWavePair({
   if (!Number.isInteger(normalizedAttempt) || normalizedAttempt < 1) {
     fail("wave attempt must be a positive integer");
   }
-  if (!new Set(["both", "claude", "codex"]).has(reviewer)) {
+  if (
+    reviewer !== undefined &&
+    !new Set(["both", "claude", "codex"]).has(reviewer)
+  ) {
     fail("wave reviewer must be both, claude, or codex");
   }
   const authorize = (status, loaded) => {
@@ -888,6 +901,7 @@ export function authorizeWavePair({
           phase4Directory: loaded.phase4Directory,
           reviewRunId: loaded.context.reviewRunId,
           nextRound: normalizedRound,
+          context: loaded.context,
         });
       }
       if (status.decision !== null) {
@@ -901,8 +915,21 @@ export function authorizeWavePair({
         fail("speculative attempt cannot start after a wave decision");
       }
     }
-    const requestedReviewers =
-      reviewer === "both" ? ["claude", "codex"] : [reviewer];
+    const enabledReviewers = getEnabledReviewers(loaded.context);
+    const requestedReviewers = reviewer === undefined
+      ? enabledReviewers
+      : reviewer === "both" ? ["claude", "codex"] : [reviewer];
+    if (requestedReviewers.some(
+      (requested) => !enabledReviewers.includes(requested),
+    )) {
+      fail("wave request includes a disabled reviewer");
+    }
+    if (
+      normalizedAttempt === 1 &&
+      JSON.stringify(requestedReviewers) !== JSON.stringify(enabledReviewers)
+    ) {
+      fail("wave attempt 1 must launch all enabled reviewers");
+    }
     for (const requested of requestedReviewers) {
       const supplied = requested === "claude" ? claudePrompt : codexPrompt;
       const purpose =
@@ -1187,15 +1214,34 @@ function pairFinished(record) {
 
 function readPairStatus(record, reviewRunId) {
   const status = readJson(pairStatusPath(record), "wave pair status");
+  const expectedReviewers = recordReviewers(record);
   if (
     status.schema !== "deep-review-pair/v6" ||
     status.reviewRunId !== reviewRunId ||
     status.phase !== "convergence" ||
     status.round !== record.round ||
+    JSON.stringify(status.expectedReviewers) !==
+      JSON.stringify(expectedReviewers) ||
     !Array.isArray(status.attempts) ||
     status.attempts.length === 0
   ) {
     fail("wave pair status identity is invalid");
+  }
+  const initial = status.attempts.find((attempt) => attempt.attempt === 1);
+  if (
+    !initial ||
+    expectedReviewers.some((reviewer) => initial[reviewer]?.requested !== true) ||
+    ["claude", "codex"].some((reviewer) =>
+      !expectedReviewers.includes(reviewer) &&
+      (status.canonical?.[reviewer] != null || status.attempts.some(
+        (attempt) => attempt[reviewer]?.requested === true,
+      )),
+    ) ||
+    status.complete !== expectedReviewers.every(
+      (reviewer) => status.canonical?.[reviewer]?.exitCode === 0,
+    )
+  ) {
+    fail("wave pair status does not preserve its fixed reviewer selection");
   }
   return status;
 }
@@ -1203,10 +1249,10 @@ function readPairStatus(record, reviewRunId) {
 function firstAttemptExitCode(pairStatus) {
   const attempt = pairStatus.attempts.find((candidate) => candidate.attempt === 1);
   if (!attempt) fail("wave pair status is missing attempt 1");
-  const requested = ["claude", "codex"].filter(
-    (reviewer) => attempt[reviewer]?.requested === true,
-  );
-  if (requested.length === 0) fail("wave attempt 1 has no requested reviewer");
+  const requested = pairStatus.expectedReviewers;
+  if (requested.some((reviewer) => attempt[reviewer]?.requested !== true)) {
+    fail("wave attempt 1 does not include every enabled reviewer");
+  }
   return reviewPairExitCode(
     requested.map((reviewer) => attempt[reviewer].exitCode),
   );
@@ -1266,7 +1312,7 @@ function buildExecutionEvidence(record, reviewRunId) {
         if (!entry.isDirectory() || !/^attempt-\d+$/u.test(entry.name)) continue;
         const attemptDirectory = path.join(artifactDirectory, entry.name);
         const attempt = { attempt: Number(entry.name.slice(8)) };
-        for (const reviewer of ["claude", "codex"]) {
+        for (const reviewer of recordReviewers(record)) {
           attempt[reviewer] = {};
           for (const stream of ["stdout", "stderr"]) {
             const filePath = path.join(
@@ -1302,7 +1348,7 @@ function buildExecutionEvidence(record, reviewRunId) {
         attempt: attempt.attempt,
         interrupted: attempt.interrupted,
       };
-      for (const reviewer of ["claude", "codex"]) {
+      for (const reviewer of recordReviewers(record)) {
         const reviewerAttempt = attempt[reviewer];
         result[reviewer] = reviewerAttempt.requested
           ? {
@@ -1839,7 +1885,12 @@ export function recordWavePidHandoffFailure({
   });
 }
 
-function readCanonicalAdjudications(phase4Directory, lastRound, reviewRunId) {
+function readCanonicalAdjudications(
+  phase4Directory,
+  lastRound,
+  reviewRunId,
+  context,
+) {
   const adjudications = [];
   for (let round = 1; round <= lastRound; round += 1) {
     const adjudication = readJson(
@@ -1854,6 +1905,12 @@ function readCanonicalAdjudications(phase4Directory, lastRound, reviewRunId) {
     ) {
       fail(`round ${round} adjudication identity is invalid`);
     }
+    if (
+      JSON.stringify(getAdjudicationReviewers(adjudication)) !==
+      JSON.stringify(getEnabledReviewers(context))
+    ) {
+      fail(`round ${round} adjudication reviewer selection does not match the fixed context`);
+    }
     adjudications.push(adjudication);
   }
   return adjudications;
@@ -1862,7 +1919,7 @@ function readCanonicalAdjudications(phase4Directory, lastRound, reviewRunId) {
 function leadHasExhaustedFailure(status) {
   const pairStatus = readPairStatus(status.lead, status.reviewRunId);
   if (pairStatus.complete === true) return false;
-  const failedReviewers = ["claude", "codex"].filter(
+  const failedReviewers = pairStatus.expectedReviewers.filter(
     (reviewer) => pairStatus.canonical?.[reviewer]?.exitCode !== 0,
   );
   return failedReviewers.length > 0 && failedReviewers.every((reviewer) => {
@@ -1920,6 +1977,7 @@ export function requestWaveDecision({ contextPath, statusPath, action }) {
             loaded.phase4Directory,
             status.firstRound,
             status.reviewRunId,
+            loaded.context,
           );
     const convergenceEndIndex = firstConvergenceEndIndex(adjudications);
     if (action === "converge") {
@@ -1937,6 +1995,7 @@ export function requestWaveDecision({ contextPath, statusPath, action }) {
         phase4Directory: loaded.phase4Directory,
         reviewRunId: status.reviewRunId,
         nextRound: status.speculativeRound,
+        context: loaded.context,
       });
     } else if (
       !unrecoverableLeadFailure &&
@@ -2094,7 +2153,7 @@ function validatePromptReceipts(status, context) {
     ["lead", status.firstRound],
     ["speculative", status.speculativeRound],
   ]) {
-    for (const reviewer of ["claude", "codex"]) {
+    for (const reviewer of getEnabledReviewers(context)) {
       const receipt = status[role].prompts?.[reviewer];
       const actual = verifyPromptManifest({
         context,
@@ -2278,6 +2337,7 @@ export function inspectReviewWaves({
           phase4Real,
           status.firstRound,
           status.reviewRunId,
+          context,
         );
         if (firstConvergenceEndIndex(adjudications) !== status.firstRound - 1) {
           fail("non-promoted convergence wave does not end at first convergence");
@@ -2336,10 +2396,6 @@ function main(argv) {
       "context",
       "firstRound",
       "supervisorPid",
-      "claudeLeadPrompt",
-      "codexLeadPrompt",
-      "claudeSpeculativePrompt",
-      "codexSpeculativePrompt",
     ]);
     return reserveWave({ contextPath: options.context, ...options });
   }
@@ -2361,7 +2417,6 @@ function main(argv) {
       "role",
       "round",
       "attempt",
-      "reviewer",
     ]);
     return authorizeWavePair({
       contextPath: options.context,

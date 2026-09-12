@@ -1,6 +1,6 @@
 # Deep Review 2
 
-Claude Code CLI と Codex CLI を独立したレビュアーとして利用し、同じ固定入力に対するコードレビューを行うスキルです。
+設定で選択した Claude Code CLI・Codex CLI を独立したレビュアーとして利用し、同じ固定入力に対するコードレビューを行うスキルです。既定では両方を使用し、片方だけでも実行できます。
 
 重要度と「今回の変更でどう扱うか」を分けて判断し、レビュー範囲を必要以上に広げず、人が対応方針を判断しやすいレポートを生成します。
 
@@ -28,8 +28,8 @@ Claude Code CLI と Codex CLI を独立したレビュアーとして利用し�
 
 - PRまたはコミット済みブランチのBASE・HEADを固定
 - safe diff、HEAD snapshot、project guidance、toolingを固定して検証
-- ClaudeとCodexへ同一の入力と品質基準を提供
-- 片方の失敗や入力不整合を「指摘なし」として扱わない
+- 実行ホストとは独立してレビュアーを選択し、同一の入力と品質基準を提供
+- 選択したレビュアーの失敗や入力不整合を「指摘なし」として扱わない
 - 重要度と、対象PRでの取扱いを分離
 - 既存判断と新しい根拠を照合し、不要な再提起を抑制
 - 人向け要約と機械的に照合できる監査証跡を生成
@@ -46,8 +46,8 @@ Claude Code CLI と Codex CLI を独立したレビュアーとして利用し�
 - GitHub CLI（PRをレビューする場合）
 - Node.js
 - jq
-- 認証済みの Claude Code CLI
-- 認証済みの Codex CLI
+- 認証済みの Claude Code CLI（Claudeを有効にする場合）
+- 認証済みの Codex CLI（Codexを有効にする場合）
 
 ## インストール
 
@@ -79,14 +79,20 @@ cp -R deep-review-with-claude-and-codex-2-snapshot/skills/deep-review-with-claud
 $HOME/.config/deep-review-with-claude-and-codex/reviewer.env
 ```
 
-4項目すべてに、利用環境で有効な値を設定してください。
+利用するレビュアーを選び、有効にした側のモデル・推論設定に、利用環境で有効な値を設定してください。
 
 ```dotenv
+CLAUDE_REVIEW_ENABLED=true
+CODEX_REVIEW_ENABLED=true
 CLAUDE_REVIEW_MODEL=<claude-model>
 CLAUDE_REVIEW_EFFORT=<effort>
 CODEX_REVIEW_MODEL=<codex-model>
 CODEX_REVIEW_REASONING_EFFORT=<effort>
 ```
+
+有効・無効には`true` / `false`を指定します。未指定はそれぞれ`true`で、両方`false`にはできません。
+たとえばClaude CodeからCodexだけにレビューさせる場合も、`CLAUDE_REVIEW_ENABLED=false`、`CODEX_REVIEW_ENABLED=true`にします。この場合、Claudeのモデル・推論設定は不要です。
+レビュアーとモデル・推論設定は準備時に固定され、再試行や追加ラウンドでも維持されます。
 
 モデル名と推論設定はCLIの対応状況に依存します。設定ファイルへAPIキーやトークンを書く必要はありません。
 
@@ -129,7 +135,7 @@ $deep-review-with-claude-and-codex-2 123
 $deep-review-with-claude-and-codex-2 --branch feature/example --base main
 ```
 
-レビュー対象のdiffとsnapshotは、外部のClaude Code CLIおよびCodex CLIへ送信されます。機密情報を含むリポジトリでは、所属組織のルールと各サービスの利用条件を確認してから実行してください。
+レビュー対象のdiffとsnapshotは、設定で選択した外部のClaude Code CLI・Codex CLIへ送信されます。機密情報を含むリポジトリでは、所属組織のルールと各サービスの利用条件を確認してから実行してください。
 
 ## メンテナンス用テスト
 
@@ -139,8 +145,6 @@ $deep-review-with-claude-and-codex-2 --branch feature/example --base main
 ```bash
 bash scripts/test-regression.sh
 ```
-
-macOSでは、書き込み失敗を模擬する`/dev/full`のテスト1件がOSの権限制約により失敗することがあります。
 
 ## License
 

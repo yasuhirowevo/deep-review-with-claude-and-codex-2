@@ -25,6 +25,10 @@ const section = (text, heading, level = 2) => {
 };
 
 export function dialogueFixture(legacy, artifact) {
+  const reviewerLabels = ["Claude", "Codex"];
+  const selected = reviewerLabels.map((label) =>
+    !new RegExp(`^- ${label} reviewer: (?:\u0060)?未選択(?:\u0060)?$`, "mu").test(legacy),
+  );
   const crossSection = section(legacy, "Claude／Codexクロスチェック");
   const cross = crossSection
     .split("\n")
@@ -49,12 +53,13 @@ export function dialogueFixture(legacy, artifact) {
       );
       const evidence = ["claude", "codex"].map(
         (model) =>
+          a.inputs[model] === null ? null :
           JSON.parse(fs.readFileSync(a.inputs[model].evidencePath, "utf8"))
             .candidates
       );
       data.push(
         `| ${round === 0 ? "初回" : round} | ${[...evidence, a.after.findings]
-          .map((items) => countsCell(count(items)))
+          .map((items) => items === null ? "—" : countsCell(count(items)))
           .join(" | ")} |`
       );
       for (const decision of a.decisions) {
@@ -71,11 +76,12 @@ export function dialogueFixture(legacy, artifact) {
     roundRows = data;
     for (const row of cross) {
       for (const model of [0, 1])
-        row[model + 1] = latest.get(`${row[0]}:${model}`) ?? "未検出";
+        row[model + 1] = selected[model] ? latest.get(`${row[0]}:${model}`) ?? "未検出" : "未選択";
     }
   } else {
     const values = [1, 2, 3].map((column) =>
-      countsCell(count(cross.map((row) => ({ severity: row[column] }))))
+      column <= 2 && !selected[column - 1] ? "—" :
+        countsCell(count(cross.map((row) => ({ severity: row[column] }))))
     );
     roundRows = Array.from(
       { length: roundCount + 1 },

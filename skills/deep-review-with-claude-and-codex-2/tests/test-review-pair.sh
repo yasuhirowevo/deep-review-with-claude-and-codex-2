@@ -25,6 +25,7 @@ cp "$SOURCE_SKILL/scripts/run-review-pair.sh" "$T/tooling/scripts/"
 cp "$SOURCE_SKILL/scripts/review-prompt-manifest.mjs" "$T/tooling/scripts/"
 cp "$SOURCE_SKILL/scripts/review-resume-provenance.mjs" "$T/tooling/scripts/"
 cp "$SOURCE_SKILL/scripts/review-pair-policy.mjs" "$T/tooling/scripts/"
+cp "$SOURCE_SKILL/scripts/reviewer-selection.mjs" "$T/tooling/scripts/"
 cp "$SOURCE_SKILL/scripts/review-output-evidence.mjs" "$T/tooling/scripts/"
 cp "$SOURCE_SKILL/scripts/review-convergence.mjs" "$T/tooling/scripts/"
 cp "$SOURCE_SKILL/scripts/review-wave-state.mjs" "$T/tooling/scripts/"
@@ -46,11 +47,13 @@ trap 'exit 143' TERM
 printf '%s\n' "$@" > "$PAIR_TEST_STATE/claude.args"
 touch "$PAIR_TEST_STATE/claude.started"
 count=0
+if [ "$(jq -r '.reviewerConfig.codex.enabled != false' "$2")" = true ]; then
 while [ ! -f "$PAIR_TEST_STATE/codex.started" ] && [ "$count" -lt 200 ]; do
   sleep 0.01
   count=$((count + 1))
 done
 [ -f "$PAIR_TEST_STATE/codex.started" ] || exit 90
+fi
 if [ "${PAIR_TEST_SLOW:-0}" = "1" ] ||
   [ "${PAIR_TEST_CLAUDE_SLOW:-0}" = "1" ]; then
   while :; do sleep 1; done
@@ -81,11 +84,13 @@ trap 'exit 143' TERM
 printf '%s\n' "$@" > "$PAIR_TEST_STATE/codex.args"
 touch "$PAIR_TEST_STATE/codex.started"
 count=0
+if [ "$(jq -r '.reviewerConfig.claude.enabled != false' "$2")" = true ]; then
 while [ ! -f "$PAIR_TEST_STATE/claude.started" ] && [ "$count" -lt 200 ]; do
   sleep 0.01
   count=$((count + 1))
 done
 [ -f "$PAIR_TEST_STATE/claude.started" ] || exit 91
+fi
 if [ "${PAIR_TEST_SLOW:-0}" = "1" ] ||
   [ "${PAIR_TEST_CODEX_SLOW:-0}" = "1" ]; then
   while :; do sleep 1; done
@@ -1188,6 +1193,118 @@ check "$unconverged_round_3_rc" "0" \
 check "$(jq -r .complete \
   "$T/artifact-unconverged/phase4/round-3/status.json")" \
   "true" "the allowed unconverged round completes normally"
+
+echo "== P09: configured single reviewers preserve selection and retry policy =="
+for selected in claude codex; do
+  disabled=codex
+  if [ "$selected" = codex ]; then disabled=claude; fi
+  single_context="$T/context-single-$selected.json"
+  single_artifact="$T/artifact-single-$selected"
+  single_state="$T/state-single-$selected"
+  single_prompt="$T/single-$selected-primary.md"
+  mkdir "$single_state"
+  write_context "$single_artifact" "$single_context"
+  jq --arg selected "$selected" --arg disabled "$disabled" \
+    '.reviewerConfig[$selected].enabled = true |
+     .reviewerConfig[$disabled] = {enabled:false,model:null} |
+     if $selected == "claude" then .codexLauncherPath = "/missing-disabled-codex" else . end' \
+    "$single_context" > "$single_context.new"
+  mv "$single_context.new" "$single_context"
+  write_prompt "$single_context" "$single_prompt" "$selected" primary "" review
+  for rejected in both "$disabled"; do
+    PAIR_TEST_STATE="$single_state" \
+      bash "$T/tooling/scripts/run-review-pair.sh" \
+      --context "$single_context" --phase primary \
+      --reviewer "$rejected" "--$selected-prompt" "$single_prompt" \
+      > "$T/single-$selected-rejected-$rejected.out" 2>&1
+    check "$?" "2" "$selected-only context rejects explicit $rejected selection"
+  done
+  PAIR_TEST_STATE="$single_state" \
+    bash "$T/tooling/scripts/run-review-pair.sh" \
+    --context "$single_context" --phase primary \
+    > "$T/single-$selected-missing-prompt.out" 2>&1
+  check "$?" "2" "$selected-only context requires its selected prompt"
+  if [ ! -e "$single_state/$selected.started" ] &&
+    [ ! -e "$single_artifact/phase2" ]; then
+    ok "$selected-only rejected requests create no launch or attempt"
+  else
+    ng "$selected-only rejected requests create no launch or attempt"
+  fi
+
+  PAIR_TEST_STATE="$single_state" PAIR_TEST_CLAUDE_FAIL=1 PAIR_TEST_CODEX_FAIL=1 \
+    bash "$T/tooling/scripts/run-review-pair.sh" \
+    --context "$single_context" --phase primary \
+    "--$selected-prompt" "$single_prompt" \
+    "--$disabled-prompt" "$T/missing-disabled-prompt" \
+    > "$T/single-$selected-failure.out" 2>&1
+  check "$?" "20" "$selected-only ordinary failure stays incomplete with exit 20"
+  if jq -e --arg selected "$selected" --arg disabled "$disabled" \
+    '.expectedReviewers == [$selected] and .complete == false and
+     .canonical[$disabled] == null and .attempts[0][$selected].requested == true and
+     .attempts[0][$disabled].requested == false and .attempts[0][$disabled].stdout == null' \
+    "$single_artifact/phase2/status.json" >/dev/null &&
+    [ ! -e "$single_state/$disabled.started" ] &&
+    [ ! -e "$single_artifact/phase2/attempt-1/$disabled.out" ]; then
+    ok "$selected-only failure records no synthetic disabled success or output"
+  else
+    ng "$selected-only failure records no synthetic disabled success or output"
+  fi
+  cp "$single_artifact/phase2/status.json" "$single_artifact/phase2/status.original"
+  jq '.expectedReviewers = ["claude","codex"]' \
+    "$single_artifact/phase2/status.json" > "$single_artifact/phase2/status.json.new"
+  mv "$single_artifact/phase2/status.json.new" "$single_artifact/phase2/status.json"
+  PAIR_TEST_STATE="$single_state" \
+    bash "$T/tooling/scripts/run-review-pair.sh" \
+    --context "$single_context" --phase primary --attempt 2 \
+    "--$selected-prompt" "$single_prompt" \
+    > "$T/single-$selected-tampered-selection.out" 2>&1
+  check "$?" "1" "$selected-only retry rejects a changed expected reviewer set"
+  cp "$single_artifact/phase2/status.original" "$single_artifact/phase2/status.json"
+  PAIR_TEST_STATE="$single_state" \
+    bash "$T/tooling/scripts/run-review-pair.sh" \
+    --context "$single_context" --phase primary --attempt 2 --reviewer "$selected" \
+    "--$selected-prompt" "$single_prompt" \
+    > "$T/single-$selected-retry.out" 2>&1
+  check "$?" "0" "$selected-only fresh retry completes without the disabled reviewer"
+  if jq -e --arg selected "$selected" --arg disabled "$disabled" \
+    '.expectedReviewers == [$selected] and .complete == true and
+     (.attempts | length) == 2 and .canonical[$selected].attempt == 2 and
+     .canonical[$selected].exitCode == 0 and .canonical[$disabled] == null and
+     .attempts[1][$selected].execution == "retry"' \
+    "$single_artifact/phase2/status.json" >/dev/null &&
+    [ ! -e "$single_state/$disabled.started" ]; then
+    ok "$selected-only canonical result retains the fixed selection across retry"
+  else
+    ng "$selected-only canonical result retains the fixed selection across retry"
+  fi
+done
+
+write_context "$T/artifact-no-reviewers" "$T/context-no-reviewers.json"
+jq '.reviewerConfig.claude.enabled = false | .reviewerConfig.codex.enabled = false' \
+  "$T/context-no-reviewers.json" > "$T/context-no-reviewers.json.new"
+mv "$T/context-no-reviewers.json.new" "$T/context-no-reviewers.json"
+bash "$T/tooling/scripts/run-review-pair.sh" \
+  --context "$T/context-no-reviewers.json" --phase primary \
+  > "$T/no-reviewers.out" 2>&1
+check "$?" "2" "both disabled reviewers are rejected before attempt creation"
+
+write_context "$T/artifact-selected-subset" "$T/context-selected-subset.json"
+PAIR_TEST_STATE="$T/state-primary" \
+  bash "$T/tooling/scripts/run-review-pair.sh" \
+  --context "$T/context-selected-subset.json" --phase primary --reviewer "" \
+  --claude-prompt "$CLAUDE_PRIMARY_PROMPT" --codex-prompt "$CODEX_PRIMARY_PROMPT" \
+  > "$T/empty-reviewer.out" 2>&1
+check "$?" "2" "explicit empty reviewer remains invalid rather than selecting the default"
+if rg -q -x --fixed-strings -- \
+  'ERROR: --reviewer must be both, claude, or codex' "$T/empty-reviewer.out"; then
+  ok "explicit empty reviewer is rejected as an invalid enum value"
+else
+  ng "explicit empty reviewer is rejected as an invalid enum value"
+fi
+bash "$T/tooling/scripts/run-review-pair.sh" \
+  --context "$T/context-selected-subset.json" --phase primary --reviewer claude \
+  --claude-prompt "$CLAUDE_PRIMARY_PROMPT" > "$T/selected-subset.out" 2>&1
+check "$?" "2" "dual-enabled attempt 1 cannot silently use one reviewer"
 
 echo ""
 printf 'RESULT: pass=%s fail=%s\n' "$pass" "$fail"

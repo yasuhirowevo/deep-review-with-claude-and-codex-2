@@ -22,14 +22,7 @@ HEAD_SHA=$(value .headSha)
 SNAPSHOT_DIGEST=$(value .snapshotMetadataSha256)
 GUIDANCE_FILE=$(value .baseGuidancePath)
 GUIDANCE_DIGEST=$(value .baseGuidanceSha256)
-value '.reviewerConfig.claude.model | select(type == "string" and length > 0)' >/dev/null
-value '.reviewerConfig.claude.effort | select(type == "string" and length > 0)' >/dev/null
-value '.reviewerConfig.codex.model | select(type == "string" and length > 0)' >/dev/null
-value '.reviewerConfig.codex.reasoningEffort | select(type == "string" and length > 0)' >/dev/null
-value '.reviewerConfigSources.claude.model | select(. == "environment" or . == "config-file")' >/dev/null
-value '.reviewerConfigSources.claude.effort | select(. == "environment" or . == "config-file")' >/dev/null
-value '.reviewerConfigSources.codex.model | select(. == "environment" or . == "config-file")' >/dev/null
-value '.reviewerConfigSources.codex.reasoningEffort | select(. == "environment" or . == "config-file")' >/dev/null
+node "$SCRIPT_DIR/reviewer-selection.mjs" --context "$CONTEXT_PATH" --validate-config >/dev/null
 
 node "$SKILL_DIR/scripts/snapshot-tooling.mjs" --verify \
   --snapshot "$SKILL_DIR" --expected-digest "$TOOLING_DIGEST"

@@ -12,9 +12,13 @@ import { isDeepStrictEqual } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import { validateOutputEvidenceFile } from "./review-output-evidence.mjs";
+import { getAdjudicationReviewers } from "./reviewer-selection.mjs";
+
+export { getAdjudicationReviewers } from "./reviewer-selection.mjs";
 
 const FINDING_ID = /^F[1-9][0-9]*$/u;
 const SEVERITIES = ["Critical", "High", "Medium", "Low"];
+const REVIEWERS = ["claude", "codex"];
 const OUTCOMES = new Set(["new", "duplicate", "rejected"]);
 const CHANGE_ACTIONS = new Set([
   "unchanged",
@@ -106,6 +110,23 @@ function validatePairIdentity(pairStatus) {
   }
 }
 
+function selectedPairReviewers(pairStatus) {
+  const reviewers = pairStatus.expectedReviewers === undefined ? REVIEWERS : pairStatus.expectedReviewers;
+  if (
+    !Array.isArray(reviewers) ||
+    reviewers.length === 0 ||
+    !isDeepStrictEqual(reviewers, REVIEWERS.filter((reviewer) => reviewers.includes(reviewer)))
+  ) {
+    fail("pair status reviewer selection is invalid");
+  }
+  for (const reviewer of REVIEWERS) {
+    if (!reviewers.includes(reviewer) && pairStatus.canonical?.[reviewer] != null) {
+      fail(`${reviewer} was not selected but has canonical output evidence`);
+    }
+  }
+  return reviewers;
+}
+
 function canonicalEvidence(pairStatus, reviewer) {
   const canonical = pairStatus.canonical?.[reviewer];
   if (
@@ -142,8 +163,10 @@ function inputRecord(evidence) {
 
 function deriveAdjudication({ pairStatus, draft, previous }) {
   validatePairIdentity(pairStatus);
-  const claude = canonicalEvidence(pairStatus, "claude");
-  const codex = canonicalEvidence(pairStatus, "codex");
+  const reviewers = selectedPairReviewers(pairStatus);
+  const evidence = Object.fromEntries(
+    reviewers.map((reviewer) => [reviewer, canonicalEvidence(pairStatus, reviewer)]),
+  );
   const before = previous
     ? canonicalFindings(previous.after?.findings, "previous final finding set")
     : [];
@@ -154,6 +177,7 @@ function deriveAdjudication({ pairStatus, draft, previous }) {
     previous &&
     (previous.schema !== "deep-review-adjudication/v1" ||
       previous.reviewRunId !== pairStatus.reviewRunId ||
+      !isDeepStrictEqual(getAdjudicationReviewers(previous), reviewers) ||
       (previous.phase === "primary"
         ? pairStatus.round !== 1
         : previous.round + 1 !== pairStatus.round))
@@ -164,7 +188,7 @@ function deriveAdjudication({ pairStatus, draft, previous }) {
   const after = canonicalFindings(draft?.after, "adjudication final finding set");
   const beforeById = new Map(before.map((finding) => [finding.id, finding]));
   const afterById = new Map(after.map((finding) => [finding.id, finding]));
-  const allCandidates = [...claude.manifest.candidates, ...codex.manifest.candidates];
+  const allCandidates = reviewers.flatMap((reviewer) => evidence[reviewer].manifest.candidates);
   const candidateById = new Map(
     allCandidates.map((candidate) => [candidate.candidateId, candidate]),
   );
@@ -279,13 +303,13 @@ function deriveAdjudication({ pairStatus, draft, previous }) {
     candidateId.startsWith("claude-") ? "claude" : "codex";
   const count = (items, predicate) => items.filter(predicate).length;
   const summary = {
-    claudeNew: count(
+    claudeNew: !reviewers.includes("claude") ? null : count(
       decisions,
       (decision) =>
         candidateReviewer(decision.candidateId) === "claude" &&
         decision.outcome === "new",
     ),
-    codexNew: count(
+    codexNew: !reviewers.includes("codex") ? null : count(
       decisions,
       (decision) =>
         candidateReviewer(decision.candidateId) === "codex" &&
@@ -305,10 +329,10 @@ function deriveAdjudication({ pairStatus, draft, previous }) {
     reviewRunId: pairStatus.reviewRunId,
     phase: pairStatus.phase,
     round: pairStatus.round,
-    inputs: {
-      claude: inputRecord(claude),
-      codex: inputRecord(codex),
-    },
+    inputs: Object.fromEntries(REVIEWERS.map((reviewer) => [
+      reviewer,
+      reviewers.includes(reviewer) ? inputRecord(evidence[reviewer]) : null,
+    ])),
     before: { sha256: findingSetSha256(before), findings: before },
     decisions,
     changes,

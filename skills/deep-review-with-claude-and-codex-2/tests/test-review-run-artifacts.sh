@@ -171,6 +171,7 @@ rebuild_pair_status() {
   run_id=$(jq -r .reviewRunId "$context")
   jq -s \
     --arg reviewRunId "$run_id" \
+    --argjson expectedReviewers "$(node "$SKILL_SCRIPTS/reviewer-selection.mjs" --context "$context")" \
     --arg phase "$phase" \
     --argjson round "$round_json" '
       sort_by(.attempt) as $attempts |
@@ -188,14 +189,15 @@ rebuild_pair_status() {
       {
         schema:"deep-review-pair/v6",
         reviewRunId:$reviewRunId,
-        expectedReviewers:["claude","codex"],
+        expectedReviewers:$expectedReviewers,
         phase:$phase,
         round:$round,
         attempts:$attempts,
         canonical:{claude:$claude,codex:$codex},
         complete:(
-          $claude != null and $claude.exitCode == 0 and
-          $codex != null and $codex.exitCode == 0
+          all($expectedReviewers[];
+            (if . == "claude" then $claude else $codex end) |
+            . != null and .exitCode == 0)
         )
       }
     ' "$status_dir"/attempt-*/status.json > "$status_dir/status.json"
@@ -205,9 +207,11 @@ write_successful_pair_status() {
   local context run_id target head_sha diff_sha snapshot_sha round_value
   local claude_prompt codex_prompt claude_prompt_receipt codex_prompt_receipt
   local claude_evidence_receipt codex_evidence_receipt
+  local enabled_reviewers
   local -a evidence_args
   local resume_header
   context="$artifact/context.json"
+  enabled_reviewers=$(node "$SKILL_SCRIPTS/reviewer-selection.mjs" --context "$context")
   run_id=$(jq -r .reviewRunId "$context")
   target=$(jq -r .target "$context")
   head_sha=$(jq -r .headSha "$context")
@@ -222,13 +226,20 @@ write_successful_pair_status() {
   fi
   claude_prompt="$artifact/prompts/$phase-${round_value:-primary}-claude-review.md"
   codex_prompt="$artifact/prompts/$phase-${round_value:-primary}-codex-review.md"
-  claude_prompt_receipt=$(write_prompt_receipt \
-    "$context" "$claude_prompt" claude "$phase" "$round_value" review)
-  codex_prompt_receipt=$(write_prompt_receipt \
-    "$context" "$codex_prompt" codex "$phase" "$round_value" review)
+  claude_prompt_receipt=null
+  codex_prompt_receipt=null
+  if jq -e 'index("claude") != null' <<< "$enabled_reviewers" >/dev/null; then
+    claude_prompt_receipt=$(write_prompt_receipt \
+      "$context" "$claude_prompt" claude "$phase" "$round_value" review)
+  fi
+  if jq -e 'index("codex") != null' <<< "$enabled_reviewers" >/dev/null; then
+    codex_prompt_receipt=$(write_prompt_receipt \
+      "$context" "$codex_prompt" codex "$phase" "$round_value" review)
+  fi
   attempt_dir="$status_dir/attempt-1"
   mkdir -p "$attempt_dir"
   for reviewer in claude codex; do
+    if ! jq -e --arg reviewer "$reviewer" 'index($reviewer) != null' <<< "$enabled_reviewers" >/dev/null; then continue; fi
     if [ "$reviewer" = "claude" ]; then
       resume_header='SESSION_ID: fixture-claude-session'
     else
@@ -253,14 +264,20 @@ OUTPUT
   if [ -n "$round_value" ]; then
     evidence_args+=(--round "$round_value")
   fi
-  claude_evidence_receipt=$(node "$OUTPUT_EVIDENCE" \
-    --input "$attempt_dir/claude.out" \
-    --output "$attempt_dir/claude.evidence.json" \
-    --reviewer claude "${evidence_args[@]}")
-  codex_evidence_receipt=$(node "$OUTPUT_EVIDENCE" \
-    --input "$attempt_dir/codex.out" \
-    --output "$attempt_dir/codex.evidence.json" \
-    --reviewer codex "${evidence_args[@]}")
+  claude_evidence_receipt=null
+  codex_evidence_receipt=null
+  if [ "$claude_prompt_receipt" != "null" ]; then
+    claude_evidence_receipt=$(node "$OUTPUT_EVIDENCE" \
+      --input "$attempt_dir/claude.out" \
+      --output "$attempt_dir/claude.evidence.json" \
+      --reviewer claude "${evidence_args[@]}")
+  fi
+  if [ "$codex_prompt_receipt" != "null" ]; then
+    codex_evidence_receipt=$(node "$OUTPUT_EVIDENCE" \
+      --input "$attempt_dir/codex.out" \
+      --output "$attempt_dir/codex.evidence.json" \
+      --reviewer codex "${evidence_args[@]}")
+  fi
   jq -n \
     --arg phase "$phase" \
     --argjson round "$round_json" \
@@ -272,22 +289,27 @@ OUTPUT
     --argjson codexPrompt "$codex_prompt_receipt" \
     --argjson claudeEvidence "$claude_evidence_receipt" \
     --argjson codexEvidence "$codex_evidence_receipt" '
+      def unselected: {
+        requested:false,launched:false,exitCode:null,execution:null,
+        resumeId:null,resumedFromAttempt:null,prompt:null,evidence:null,
+        stdout:null,stderr:null
+      };
       {
         schema:"deep-review-attempt/v4",
         phase:$phase,
         round:$round,
         attempt:1,
         interrupted:false,
-        claude:{
+        claude:(if $claudePrompt == null then unselected else {
           requested:true,launched:true,exitCode:0,execution:"initial",
           resumeId:null,resumedFromAttempt:null,prompt:$claudePrompt,evidence:$claudeEvidence,
           stdout:$claudeOutput,stderr:$claudeError
-        },
-        codex:{
+        } end),
+        codex:(if $codexPrompt == null then unselected else {
           requested:true,launched:true,exitCode:0,execution:"initial",
           resumeId:null,resumedFromAttempt:null,prompt:$codexPrompt,evidence:$codexEvidence,
           stdout:$codexOutput,stderr:$codexError
-        }
+        } end)
       }
     ' > "$attempt_dir/status.json"
   rebuild_pair_status "$status_dir" "$context" "$phase" "$round_json"
@@ -490,9 +512,11 @@ promote_fixture_as_wave() {
     >/dev/null || return 1
 }
 write_retained_adjudication_chain() {
-  local artifact="$1" attempt_dir reviewer receipt draft previous output round
+  local artifact="$1" attempt_dir reviewer receipt draft previous output round enabled_reviewers
+  enabled_reviewers=$(node "$SKILL_SCRIPTS/reviewer-selection.mjs" --context "$artifact/context.json")
   attempt_dir="$artifact/phase2/attempt-1"
   for reviewer in claude codex; do
+    if ! jq -e --arg reviewer "$reviewer" 'index($reviewer) != null' <<< "$enabled_reviewers" >/dev/null; then continue; fi
     sed 's/^NO_FINDINGS$/Medium: retained finding/' \
       "$attempt_dir/$reviewer.out" > "$T/retained-$reviewer.out"
     mv "$T/retained-$reviewer.out" "$attempt_dir/$reviewer.out"
@@ -508,26 +532,15 @@ write_retained_adjudication_chain() {
   rebuild_pair_status "$artifact/phase2" "$artifact/context.json" primary null
 
   draft="$artifact/phase2/adjudication-draft.json"
-  cat > "$draft" <<'JSON'
-{
-  "decisions":[
-    {
-      "candidateId":"claude-F001",
-      "outcome":"new",
-      "findingId":"F1",
-      "rationale":"fixture candidate"
-    },
-    {
-      "candidateId":"codex-F001",
-      "outcome":"duplicate",
-      "findingId":"F1",
-      "rationale":"same fixture candidate"
-    }
-  ],
-  "changes":[],
-  "after":[{"id":"F1","severity":"Medium","title":"`retained()` finding"}]
-}
-JSON
+  jq -n --argjson reviewers "$enabled_reviewers" '{
+    decisions: [$reviewers | to_entries[] | {
+      candidateId:(.value + "-F001"),
+      outcome:(if .key == 0 then "new" else "duplicate" end),
+      findingId:"F1",rationale:"fixture candidate"
+    }],
+    changes:[],
+    after:[{id:"F1",severity:"Medium",title:"`retained()` finding"}]
+  }' > "$draft"
   output="$artifact/phase2/adjudication.json"
   rm -f "$output"
   node "$ADJUDICATION" \
@@ -653,6 +666,8 @@ write_valid_report() {
   local phase4_count excluded_count retained_count not_judged_count excluded_section
   local earlier_section earlier_rows adjudication_file scope candidate_id outcome rationale
   local conclusion cross_rows medium_count medium_findings unchanged_count
+  local enabled_reviewers claude_state=成功 codex_state=成功 claude_new=0 codex_new=0
+  local claude_trace="Claude Code CLI test / effort=test" codex_trace="Codex CLI test / reasoning=test"
   local -a finalizer_args
   artifact=$(dirname "$output")
   if [ "$alternate_unstable" = "true" ]; then
@@ -663,6 +678,7 @@ write_valid_report() {
     write_zero_adjudication_chain "$artifact" || return 1
   fi
   context_path="$(dirname "$output")/context.json"
+  enabled_reviewers=$(node "$SKILL_SCRIPTS/reviewer-selection.mjs" --context "$context_path")
   review_mode=$(jq -r .reviewMode "$context_path")
   final_adjudication="$artifact/phase4/round-$round_count/adjudication.json"
   final_draft="$artifact/phase5/final-findings-draft.json"
@@ -822,13 +838,31 @@ JSON
     header="# Deep Review: branch $head_ref"
     comments='PR未作成のため不適用'
   fi
+  if ! jq -e 'index("claude") != null' <<< "$enabled_reviewers" >/dev/null; then
+    claude_state=未選択
+    claude_new=—
+    claude_trace=未選択
+    initial_review=${initial_review/Claude 成功/Claude 未選択}
+    cross_rows=${cross_rows/\| F1 \| Medium \|/| F1 | 未選択 |}
+    medium_findings=${medium_findings/Claude \`Medium\`/Claude \`未選択\`}
+    medium_findings=${medium_findings/\`両方\`/\`Codex\`}
+  fi
+  if ! jq -e 'index("codex") != null' <<< "$enabled_reviewers" >/dev/null; then
+    codex_state=未選択
+    codex_new=—
+    codex_trace=未選択
+    initial_review=${initial_review/Codex 成功/Codex 未選択}
+    cross_rows=${cross_rows/\| F1 \| Medium \| Medium \|/| F1 | Medium | 未選択 |}
+    medium_findings=${medium_findings/Codex \`Medium\`/Codex \`未選択\`}
+    medium_findings=${medium_findings/\`両方\`/\`Claude\`}
+  fi
   for ((round = 1; round <= round_count; round++)); do
     if [ "$alternate_unstable" = "true" ] && [ $((round % 2)) -eq 1 ]; then
       round_rows+="| $round | fixture | 成功 | 成功 | 1 | 0 | 1 | 0 | 0 | 0 | 0 | あり |"$'\n'
     elif [ "$alternate_unstable" = "true" ]; then
       round_rows+="| $round | fixture | 成功 | 成功 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | あり |"$'\n'
     else
-      round_rows+="| $round | fixture | 成功 | 成功 | 0 | 0 | 0 | 0 | 0 | 0 | ${unchanged_count} | なし |"$'\n'
+      round_rows+="| $round | fixture | $claude_state | $codex_state | $claude_new | $codex_new | 0 | 0 | 0 | 0 | ${unchanged_count} | なし |"$'\n'
     fi
   done
   earlier_rows=""
@@ -969,8 +1003,8 @@ $comments
 - 対象: $target
 - BASE / HEAD / merge-base: $base_sha / $head_sha / $merge_base_sha
 - オーケストレーター: Codex
-- Claude reviewer: Claude Code CLI test / effort=test
-- Codex reviewer: Codex CLI test / reasoning=test
+- Claude reviewer: $claude_trace
+- Codex reviewer: $codex_trace
 - review run ID: $run_id
 - tooling digest: $tooling_digest
 - diff digest: $diff_digest
@@ -2249,6 +2283,130 @@ NODE
   done
   cp "$T/partition-legacy.md" "$partition_artifact/report.md"
   cp "$T/partition-final-original.json" "$partition_artifact/phase5/final-findings.json"
+done
+
+echo "== R07d: a single selected reviewer completes the full evidence and report chain =="
+for selected_reviewer in claude codex; do
+  if [ "$selected_reviewer" = "claude" ]; then
+    disabled_reviewer=codex
+    selected_target=851
+    selected_mode=pr
+    selected_identity=pr:851
+    selected_pr=851
+    selected_ref=""
+  else
+    disabled_reviewer=claude
+    selected_target=selected-codex
+    selected_mode=branch
+    selected_identity=branch:selected-codex
+    selected_pr=""
+    selected_ref=selected-codex
+  fi
+  selected_context=$(DEEP_REVIEW_TEMP_ROOT="$T/temp" bash "$INITIALIZER" \
+    --tooling-root "$T/tooling" --target "$selected_target")
+  selected_context=$(jq --arg reviewer "$selected_reviewer" '. + {
+    reviewerConfig: {
+      claude:{enabled:($reviewer == "claude"),model:"test",effort:"test"},
+      codex:{enabled:($reviewer == "codex"),model:"test",reasoningEffort:"test"}
+    }
+  }' <<< "$selected_context")
+  selected_artifact=$(jq -r .reviewArtifactDir <<< "$selected_context")
+  selected_run_id=$(jq -r .reviewRunId <<< "$selected_context")
+  write_context_file "$selected_context" "$selected_mode" "$selected_identity" \
+    "$selected_target" "$selected_pr" "$selected_ref"
+  write_successful_review_evidence "$selected_artifact"
+  write_valid_report "$selected_artifact/report.md" "$selected_reviewer-only" \
+    'Claude 成功 / Codex 成功' なし 2 収束 連続2回 false retained
+  publish_selected_report() {
+    node "$PUBLISHER" --tooling-root "$T/tooling" \
+      --target "$selected_target" --run-id "$selected_run_id" --mode full \
+      --report-path "$selected_artifact/report.md" >"$T/selected-publish.out" 2>"$T/selected-publish.err"
+  }
+  publish_selected_report
+  selected_rc=$?
+  check "$selected_rc" "0" "$selected_reviewer-only legacy report publishes with a retained finding"
+  if [ "$selected_rc" != "0" ]; then sed -n '1,12p' "$T/selected-publish.err"; fi
+  cp "$selected_artifact/report.md" "$T/selected-legacy.md"
+  node "$SCRIPTS/report-dialogue-fixture.mjs" "$T/selected-legacy.md" \
+    "$selected_artifact/report.md" "$selected_artifact"
+  publish_selected_report
+  selected_rc=$?
+  check "$selected_rc" "0" "$selected_reviewer-only dialogue report publishes with canonical evidence"
+  if [ "$selected_rc" != "0" ]; then sed -n '1,12p' "$T/selected-publish.err"; fi
+  cp "$selected_artifact/report.md" "$T/selected-report.md"
+  if [ ! -e "$selected_artifact/phase2/attempt-1/$disabled_reviewer.out" ] && \
+      jq -e --arg reviewer "$selected_reviewer" --arg disabled "$disabled_reviewer" \
+        '.expectedReviewers == [$reviewer] and .complete == true and .canonical[$disabled] == null' \
+        "$selected_artifact/phase2/status.json" >/dev/null && \
+      jq -e --arg reviewer "$selected_reviewer" --arg disabled "$disabled_reviewer" \
+        '.inputs[$disabled] == null and .summary[($disabled + "New")] == null and .summary[($reviewer + "New")] == 1' \
+        "$selected_artifact/phase2/adjudication.json" >/dev/null; then
+    ok "$selected_reviewer-only artifacts contain no disabled output or zero-count success"
+  else ng "$selected_reviewer-only artifacts contain no disabled output or zero-count success"; fi
+
+  node --input-type=module - "$T/selected-report.md" "$T" "$selected_reviewer" <<'NODE'
+import { readFileSync, writeFileSync } from "node:fs";
+const [input, root, reviewer] = process.argv.slice(2);
+const good = readFileSync(input, "utf8");
+const label = reviewer === "claude" ? "Claude" : "Codex";
+const variants = {
+  "fake-counts": good.replace(/^\| 初回 \|.*$/mu, (line) => line.replace(" — ", " C0 H0 M0 L0（計0） ")),
+  "fake-new-zero": good.replace(/^\| 1 \|.*成功.*$/mu, (line) => line.replace(" — ", " 0 ")),
+  "fake-model": good.replace(new RegExp(`^(- ${label} reviewer:).*`, "mu"), `$1 forged model`),
+  "fake-detection": good.replace(new RegExp(`(- 検出: )\u0060?${label}\u0060?`, "u"), "$1両方"),
+  "one-round": good.replace(/^\| 2 \|.*\n/gmu, ""),
+};
+for (const [name, content] of Object.entries(variants)) {
+  if (content === good) throw new Error(`singleton mutation did not apply: ${name}`);
+  writeFileSync(`${root}/selected-${name}.md`, content);
+}
+NODE
+  for selected_mutation in fake-counts fake-new-zero fake-model fake-detection one-round; do
+    cp "$T/selected-$selected_mutation.md" "$selected_artifact/report.md"
+    publish_selected_report
+    check "$?" "1" "$selected_reviewer-only publication rejects $selected_mutation"
+  done
+  cp "$T/selected-report.md" "$selected_artifact/report.md"
+  cp "$selected_artifact/phase2/status.json" "$T/selected-status.json"
+  jq --arg disabled "$disabled_reviewer" --arg reviewer "$selected_reviewer" \
+    '.canonical[$disabled] = .canonical[$reviewer]' "$T/selected-status.json" \
+    > "$selected_artifact/phase2/status.json"
+  publish_selected_report
+  check "$?" "1" "$selected_reviewer-only publication rejects fabricated disabled canonical output"
+  jq --arg reviewer "$selected_reviewer" '.canonical[$reviewer] = null' \
+    "$T/selected-status.json" > "$selected_artifact/phase2/status.json"
+  publish_selected_report
+  check "$?" "1" "$selected_reviewer-only missing canonical output cannot publish"
+  cp "$T/selected-status.json" "$selected_artifact/phase2/status.json"
+
+  cp "$selected_artifact/phase2/attempt-1/$selected_reviewer.out" "$T/selected-original.out"
+  sed '/^INPUT_ATTESTATION: verified$/d' "$T/selected-original.out" \
+    > "$selected_artifact/phase2/attempt-1/$selected_reviewer.out"
+  publish_selected_report
+  check "$?" "1" "$selected_reviewer-only publication still validates input attestation and output hashes"
+  cp "$T/selected-original.out" "$selected_artifact/phase2/attempt-1/$selected_reviewer.out"
+
+  cp "$selected_artifact/phase2/attempt-1/status.json" "$T/selected-attempt.json"
+  jq --arg reviewer "$selected_reviewer" '.[$reviewer].exitCode = 7 | .[$reviewer].evidence = null' \
+    "$T/selected-attempt.json" > "$selected_artifact/phase2/attempt-1/status.json"
+  rebuild_pair_status "$selected_artifact/phase2" "$selected_artifact/context.json" primary null
+  publish_selected_report
+  check "$?" "1" "$selected_reviewer-only selected reviewer failure remains incomplete"
+  cp "$T/selected-attempt.json" "$selected_artifact/phase2/attempt-1/status.json"
+  cp "$T/selected-status.json" "$selected_artifact/phase2/status.json"
+
+  cp "$selected_artifact/phase4/round-2/adjudication.json" "$T/selected-adjudication.json"
+  jq --arg disabled "$disabled_reviewer" '.inputs[$disabled] = {}' "$T/selected-adjudication.json" \
+    > "$selected_artifact/phase4/round-2/adjudication.json"
+  publish_selected_report
+  check "$?" "1" "$selected_reviewer-only adjudication cannot change reviewer selection"
+  cp "$T/selected-adjudication.json" "$selected_artifact/phase4/round-2/adjudication.json"
+
+  cp "$selected_artifact/phase5/final-findings.json" "$T/selected-final.json"
+  jq '.decisions = []' "$T/selected-final.json" > "$selected_artifact/phase5/final-findings.json"
+  publish_selected_report
+  check "$?" "1" "$selected_reviewer-only final findings still require every handling decision"
+  cp "$T/selected-final.json" "$selected_artifact/phase5/final-findings.json"
 done
 
 echo "== R08: caller-supplied report aliases cannot bypass symlink rejection =="

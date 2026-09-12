@@ -56,25 +56,14 @@ if (!Number.isSafeInteger(value) || value <= 0 || value > Date.now()) {
 ' "$REVIEW_STARTED_AT_MS"
 
 REVIEWER_CONFIG_RESOLVED=$(bash "$SCRIPT_DIR/resolve-reviewer-config.sh")
-IFS=$'\t' read -r \
-  CLAUDE_REVIEW_MODEL_FIXED CLAUDE_REVIEW_EFFORT_FIXED \
-  CODEX_REVIEW_MODEL_FIXED CODEX_REVIEW_REASONING_EFFORT_FIXED \
-  CLAUDE_REVIEW_MODEL_SOURCE CLAUDE_REVIEW_EFFORT_SOURCE \
-  CODEX_REVIEW_MODEL_SOURCE CODEX_REVIEW_REASONING_EFFORT_SOURCE <<< "$(
-    printf '%s' "$REVIEWER_CONFIG_RESOLVED" | jq -r '[
-      .reviewerConfig.claude.model,
-      .reviewerConfig.claude.effort,
-      .reviewerConfig.codex.model,
-      .reviewerConfig.codex.reasoningEffort,
-      .reviewerConfigSources.claude.model,
-      .reviewerConfigSources.claude.effort,
-      .reviewerConfigSources.codex.model,
-      .reviewerConfigSources.codex.reasoningEffort
-    ] | @tsv'
-  )"
-printf '%s\n' \
-  "INFO: reviewer config: Claude=$CLAUDE_REVIEW_MODEL_FIXED/$CLAUDE_REVIEW_EFFORT_FIXED ($CLAUDE_REVIEW_MODEL_SOURCE/$CLAUDE_REVIEW_EFFORT_SOURCE), Codex=$CODEX_REVIEW_MODEL_FIXED/$CODEX_REVIEW_REASONING_EFFORT_FIXED ($CODEX_REVIEW_MODEL_SOURCE/$CODEX_REVIEW_REASONING_EFFORT_SOURCE)" \
-  >&2
+printf '%s' "$REVIEWER_CONFIG_RESOLVED" | jq -r '
+  .reviewerConfig as $config | .reviewerConfigSources as $sources |
+  def describe($reviewer; $label; $effort):
+    if $config[$reviewer].enabled then
+      "\($label)=\($config[$reviewer].model)/\($config[$reviewer][$effort]) (\($sources[$reviewer].model)/\($sources[$reviewer][$effort]))"
+    else "\($label)=disabled (\($sources[$reviewer].enabled))" end;
+  "INFO: reviewer config: \(describe("claude"; "Claude"; "effort")), \(describe("codex"; "Codex"; "reasoningEffort"))"
+' >&2
 
 PROJECT_ROOT=$(git -C "$PROJECT_INPUT" rev-parse --show-toplevel)
 PROJECT_ROOT=$(cd "$PROJECT_ROOT" && pwd -P)
@@ -262,14 +251,7 @@ process.stdout.write(`${JSON.stringify({...base, ...extra})}\n`);
   --arg baseGuidancePath "$GUIDANCE_FILE" \
   --arg baseGuidanceSha256 "$BASE_GUIDANCE_SHA256" \
   --arg controlPathsChanged "$CONTROL_PATHS_CHANGED" \
-  --arg claudeReviewModel "$CLAUDE_REVIEW_MODEL_FIXED" \
-  --arg claudeReviewEffort "$CLAUDE_REVIEW_EFFORT_FIXED" \
-  --arg codexReviewModel "$CODEX_REVIEW_MODEL_FIXED" \
-  --arg codexReviewReasoningEffort "$CODEX_REVIEW_REASONING_EFFORT_FIXED" \
-  --arg claudeReviewModelSource "$CLAUDE_REVIEW_MODEL_SOURCE" \
-  --arg claudeReviewEffortSource "$CLAUDE_REVIEW_EFFORT_SOURCE" \
-  --arg codexReviewModelSource "$CODEX_REVIEW_MODEL_SOURCE" \
-  --arg codexReviewReasoningEffortSource "$CODEX_REVIEW_REASONING_EFFORT_SOURCE" \
+  --argjson reviewerSettings "$REVIEWER_CONFIG_RESOLVED" \
   '{reviewStartedAtMs:$reviewStartedAtMs,
     skillDir:$skillDir,toolingDigest:$toolingDigest,
     codexLauncherPath:$codexLauncherPath,
@@ -286,14 +268,8 @@ process.stdout.write(`${JSON.stringify({...base, ...extra})}\n`);
     snapshotMetadataSha256:$snapshotMetadataSha256,
     baseGuidancePath:$baseGuidancePath,
     baseGuidanceSha256:$baseGuidanceSha256,
-    reviewerConfig:{
-      claude:{model:$claudeReviewModel,effort:$claudeReviewEffort},
-      codex:{model:$codexReviewModel,reasoningEffort:$codexReviewReasoningEffort}
-    },
-    reviewerConfigSources:{
-      claude:{model:$claudeReviewModelSource,effort:$claudeReviewEffortSource},
-      codex:{model:$codexReviewModelSource,reasoningEffort:$codexReviewReasoningEffortSource}
-    },
+    reviewerConfig:$reviewerSettings.reviewerConfig,
+    reviewerConfigSources:$reviewerSettings.reviewerConfigSources,
     controlPathsChanged:($controlPathsChanged|split("\n")|map(select(length>0)))}'
 )")
 

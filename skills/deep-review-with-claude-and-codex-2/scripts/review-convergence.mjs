@@ -7,6 +7,8 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
+import { getAdjudicationReviewers, getEnabledReviewers } from "./reviewer-selection.mjs";
 
 function fail(message) {
   throw new Error(message);
@@ -14,10 +16,17 @@ function fail(message) {
 
 export function isStableRound(adjudication) {
   const summary = adjudication?.summary;
+  let reviewers;
+  try {
+    reviewers = getAdjudicationReviewers(adjudication);
+  } catch {
+    return false;
+  }
   return (
     summary?.reviewersSucceeded !== false &&
-    summary?.claudeNew === 0 &&
-    summary?.codexNew === 0 &&
+    ["claude", "codex"].every((reviewer) =>
+      summary?.[`${reviewer}New`] === (reviewers.includes(reviewer) ? 0 : null),
+    ) &&
     summary?.withdrawn === 0 &&
     summary?.downgraded === 0 &&
     summary?.upgraded === 0 &&
@@ -25,7 +34,19 @@ export function isStableRound(adjudication) {
   );
 }
 
+function assertReviewerSelection(adjudications, expectedReviewers) {
+  const reviewers = expectedReviewers ?? (
+    adjudications.length ? getAdjudicationReviewers(adjudications[0]) : null
+  );
+  if (adjudications.some((adjudication) =>
+    !isDeepStrictEqual(getAdjudicationReviewers(adjudication), reviewers),
+  )) {
+    fail("convergence adjudication reviewer selection does not match the run");
+  }
+}
+
 export function firstConvergenceEndIndex(adjudications) {
+  assertReviewerSelection(adjudications);
   for (let index = 1; index < adjudications.length; index += 1) {
     if (
       isStableRound(adjudications[index - 1]) &&
@@ -38,6 +59,7 @@ export function firstConvergenceEndIndex(adjudications) {
 }
 
 export function stableTailLength(adjudications) {
+  assertReviewerSelection(adjudications);
   let stableTail = 0;
   for (const adjudication of adjudications) {
     stableTail = isStableRound(adjudication) ? stableTail + 1 : 0;
@@ -102,6 +124,7 @@ export function assertCanStartRound({
   phase4Directory,
   reviewRunId,
   nextRound,
+  context,
 }) {
   const phase4Stat = lstatSync(phase4Directory);
   if (phase4Stat.isSymbolicLink() || !phase4Stat.isDirectory()) {
@@ -119,6 +142,7 @@ export function assertCanStartRound({
       }),
     );
   }
+  assertReviewerSelection(adjudications, context ? getEnabledReviewers(context) : undefined);
   const convergenceEndIndex = firstConvergenceEndIndex(adjudications);
   if (convergenceEndIndex >= 0) {
     fail(
@@ -132,6 +156,7 @@ function parseArgs(argv) {
     ["--phase4-dir", "phase4Directory"],
     ["--review-run-id", "reviewRunId"],
     ["--next-round", "nextRound"],
+    ["--context", "contextPath"],
   ]);
   const parsed = {};
   for (let index = 0; index < argv.length; index += 2) {
@@ -142,12 +167,17 @@ function parseArgs(argv) {
     if (parsed[key] !== undefined) fail(`duplicate argument: ${flag}`);
     parsed[key] = value;
   }
-  for (const key of allowed.values()) {
+  for (const key of ["phase4Directory", "reviewRunId", "nextRound"]) {
     if (!parsed[key]) fail(`missing required argument: ${key}`);
   }
   parsed.nextRound = Number(parsed.nextRound);
   if (!Number.isInteger(parsed.nextRound) || parsed.nextRound < 1) {
     fail("next-round must be a positive integer");
+  }
+  if (parsed.contextPath) {
+    const stat = lstatSync(parsed.contextPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) fail("unsafe review context");
+    parsed.context = JSON.parse(readFileSync(parsed.contextPath, "utf8"));
   }
   return parsed;
 }

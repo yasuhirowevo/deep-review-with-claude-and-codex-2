@@ -41,4 +41,4 @@ node "$SCRIPT_DIR/snapshot-tooling.mjs" --verify \
   --require-private
 
 export CODEX_REVIEW_MODEL CODEX_REVIEW_REASONING_EFFORT
-exec bash "$RUNNER_PATH" "$@"
+exec bash "$RUNNER_PATH" --context "$CONTEXT_PATH" "$@"

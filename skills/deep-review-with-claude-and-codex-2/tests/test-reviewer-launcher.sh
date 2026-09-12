@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -uo pipefail
+unset CLAUDE_REVIEW_ENABLED CODEX_REVIEW_ENABLED
 
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SKILL_DIR="$(cd -P "$TEST_DIR/.." && pwd -P)"
@@ -176,6 +177,78 @@ expect_failure "follow-up rejects output outside phase3/followup-N" \
 expect_failure "launcher shell rejects before dispatching an invalid mode" \
   bash "$SCRIPTS/launch-run-reviewer.sh" \
     --context "$context_path" --mode arbitrary -- "${pair_args[@]}"
+
+echo "== L06: omitted selection and singleton launch contracts =="
+expect_success "omitted initial reviewer selection uses the prepared dual selection" \
+  node "$verifier" --context "$context_path" --mode pair -- \
+    --context "$context_path" --claude-prompt "$claude_primary" \
+    --codex-prompt "$codex_primary" --phase primary --attempt 1
+for selected in claude codex; do
+  chmod 600 "$context_path"
+  printf '%s' "$context_json" | jq --arg selected "$selected" '
+    (if $selected == "claude" then "codex" else "claude" end) as $disabled |
+    .reviewerConfig[$disabled].enabled = false |
+    .reviewerConfigSources[$disabled].enabled = "environment" |
+    .reviewerConfig[$disabled].model = null |
+    .reviewerConfigSources[$disabled].model = null |
+    (if $disabled == "claude" then
+      .reviewerConfig.claude.effort = null | .reviewerConfigSources.claude.effort = null
+    else
+      .reviewerConfig.codex.reasoningEffort = null | .reviewerConfigSources.codex.reasoningEffort = null
+    end)
+  ' > "$context_path"
+  chmod 400 "$context_path"
+  if [ "$selected" = claude ]; then
+    disabled=codex
+    selected_primary="$claude_primary"; selected_lead="$claude_round_1"; selected_speculative="$claude_round_2"
+    disabled_primary="$codex_primary"
+  else
+    disabled=claude
+    selected_primary="$codex_primary"; selected_lead="$codex_round_1"; selected_speculative="$codex_round_2"
+    disabled_primary="$claude_primary"
+  fi
+  expect_success "$selected-only prepared settings verify with disabled null fields" \
+    bash "$snapshot_skill/scripts/verify-review-run.sh" "$context_path"
+  expect_success "launcher derives omitted $selected-only initial reviewer" \
+    node "$verifier" --context "$context_path" --mode pair -- \
+      --context "$context_path" "--$selected-prompt" "$selected_primary" --phase primary --attempt 1
+  expect_success "launcher accepts explicit $selected-only initial reviewer" \
+    node "$verifier" --context "$context_path" --mode pair -- \
+      --context "$context_path" "--$selected-prompt" "$selected_primary" --phase primary --attempt 1 --reviewer "$selected"
+  expect_failure "$selected-only context rejects an explicit both request" \
+    node "$verifier" --context "$context_path" --mode pair -- "${pair_args[@]}"
+  expect_failure "$selected-only context rejects disabled reviewer retry" \
+    node "$verifier" --context "$context_path" --mode pair -- \
+      --context "$context_path" "--$disabled-prompt" "$disabled_primary" --phase primary --attempt 2 --reviewer "$disabled"
+  expect_success "launcher accepts $selected-only wave prompts" \
+    node "$verifier" --context "$context_path" --mode wave -- \
+      --context "$context_path" --first-round 1 \
+      "--$selected-lead-prompt" "$selected_lead" "--$selected-speculative-prompt" "$selected_speculative"
+  expect_failure "$selected-only wave rejects disabled reviewer prompts" \
+    node "$verifier" --context "$context_path" --mode wave -- \
+      --context "$context_path" --first-round 1 \
+      "--$selected-lead-prompt" "$selected_lead" "--$selected-speculative-prompt" "$selected_speculative" \
+      "--$disabled-lead-prompt" "$disabled_primary"
+  expect_failure "prompt builder rejects disabled $disabled review" \
+    node "$snapshot_skill/scripts/build-review-prompt.mjs" --context "$context_path" \
+      --phase primary --reviewer "$disabled" --threat-model "$threat_model" \
+      --output "$run_root/disabled-$disabled.md"
+  expect_failure "prompt builder rejects disabled $disabled resume" \
+    node "$snapshot_skill/scripts/build-review-prompt.mjs" --context "$context_path" \
+      --phase primary --reviewer "$disabled" --purpose resume --output "$run_root/disabled-$disabled-resume.md"
+  expect_failure "prompt manifest verification rejects disabled $disabled" \
+    node "$snapshot_skill/scripts/review-prompt-manifest.mjs" --verify --context "$context_path" \
+      --prompt "$disabled_primary" --reviewer "$disabled" --phase primary --purpose review
+  if [ "$selected" = codex ]; then
+    expect_failure "trusted follow-up launcher rejects disabled Claude" \
+      node "$verifier" --context "$context_path" --mode claude-followup \
+        --stdout-path "$artifact_dir/phase3/followup-1/claude.out" \
+        --stderr-path "$artifact_dir/phase3/followup-1/claude.err" -- "${followup_args[@]}"
+  fi
+done
+chmod 600 "$context_path"
+printf '%s\n' "$context_json" > "$context_path"
+chmod 400 "$context_path"
 
 echo ""
 printf 'RESULT: pass=%s fail=%s\n' "$pass" "$fail"

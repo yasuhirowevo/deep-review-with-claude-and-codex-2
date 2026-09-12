@@ -658,5 +658,53 @@ for fixture in forged-main-count swapped-counts forged-separate-count forged-low
   expect_fail "$T/partition-$fixture.md" "dialogue rejects partition $fixture"
 done
 
+echo "== RC07: one selected reviewer preserves all report sections and convergence =="
+node --input-type=module - "$T" "$TEST_DIR/report-dialogue-fixture.mjs" <<'NODE'
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const [root, fixturePath] = process.argv.slice(2);
+const { dialogueFixture } = await import(pathToFileURL(fixturePath));
+const baseline = readFileSync(`${root}/valid.md`, "utf8");
+for (const reviewer of ["claude", "codex"]) {
+  const selected = reviewer === "claude" ? "Claude" : "Codex";
+  const disabled = reviewer === "claude" ? "Codex" : "Claude";
+  const column = reviewer === "claude" ? 1 : 0;
+  let legacy = baseline
+    .replace(new RegExp(`^- ${disabled} reviewer:.*$`, "mu"), `- ${disabled} reviewer: 未選択`)
+    .replace(`${disabled} \u0060成功\u0060`, `${disabled} \u0060未選択\u0060`)
+    .replace(new RegExp(`${disabled} \u0060(?:Medium|High)\u0060`, "gu"), `${disabled} \u0060未選択\u0060`)
+    .replace("- 検出: \u0060両方\u0060", `- 検出: ${selected}`)
+    .replace(/^\| F1 \|.*$/mu, (line) => {
+      const cells = line.split("|"); cells[column + 2] = " 未選択 "; return cells.join("|");
+    })
+    .replace(/^\| \d+ \|.*$/gmu, (line) => {
+      const cells = line.split("|");
+      cells[column + 3] = " 未選択 "; cells[column + 5] = " — ";
+      return cells.join("|");
+    });
+  const dialogue = dialogueFixture(legacy);
+  const variants = {
+    legacy,
+    dialogue,
+    "fake-zero": dialogue.replace(/^\| 初回 \|.*$/mu, (line) => line.replace(" — ", " C0 H0 M0 L0（計0） ")),
+    "fake-new-zero": dialogue.replace(/^\| 1 \|.*成功.*$/mu, (line) => line.replace(" — ", " 0 ")),
+    "fake-success": dialogue.replace(/^\| 1 \|.*成功.*$/mu, (line) => line.replace(" 未選択 ", " 成功 ")),
+    "missing-round": dialogue.replace(/^\| 2 \|.*\n/gmu, ""),
+    "selected-failure": dialogue.replace(/^\| 2 \|.*成功.*$/mu, (line) => line.replace(" 成功 ", " 失敗 ")),
+    "fake-detection": dialogue.replace(`- 検出: ${selected}`, "- 検出: 両方"),
+  };
+  for (const [name, content] of Object.entries(variants)) {
+    writeFileSync(`${root}/${reviewer}-${name}.md`, content);
+  }
+}
+NODE
+for reviewer in claude codex; do
+  expect_pass "$T/$reviewer-legacy.md" "$reviewer-only legacy report keeps the established structure"
+  expect_pass "$T/$reviewer-dialogue.md" "$reviewer-only dialogue report uses explicit not-selected markers"
+  for variant in fake-zero fake-new-zero fake-success missing-round selected-failure fake-detection; do
+    expect_fail "$T/$reviewer-$variant.md" "$reviewer-only report rejects $variant"
+  done
+done
+
 printf 'RESULT: pass=%s fail=%s\n' "$pass" "$fail"
 exit "$fail"

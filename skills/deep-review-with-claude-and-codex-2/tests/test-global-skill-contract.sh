@@ -17,6 +17,7 @@ printf '%s\n' \
   'CODEX_REVIEW_REASONING_EFFORT=suite-codex-effort' \
   > "$DEFAULT_REVIEWER_CONFIG"
 export DEEP_REVIEW_CONFIG_FILE="$DEFAULT_REVIEWER_CONFIG"
+unset CLAUDE_REVIEW_ENABLED CODEX_REVIEW_ENABLED
 
 pass=0
 fail=0
@@ -72,8 +73,8 @@ require_text "$SKILL_DIR/CONSTITUTION.md" \
 require_text "$SKILL_DIR/agents/openai.yaml" \
   "allow_implicit_invocation: false" \
   "the skill is explicit-only"
-require_text "$SKILL_DIR/SKILL.md" "外部Claude＋外部Codex" \
-  "both hosts use the same two external model families"
+require_text "$SKILL_DIR/SKILL.md" "設定で選択した外部reviewerを使う" \
+  "both hosts use the configured external reviewers"
 require_text "$SKILL_DIR/SKILL.md" "ホスト内Agentをreviewerにしない" \
   "in-host agents are excluded as leaf reviewers"
 require_text "$SKILL_DIR/SKILL.md" \
@@ -163,8 +164,11 @@ require_text "$SKILL_DIR/SKILL.md" "scripts/run-review-preflight.sh" \
 require_text "$SKILL_DIR/SKILL.md" 'select(.status == "passed") | .contextPath' \
   "orchestrator advances only from a passed preflight result"
 require_text "$SKILL_DIR/SKILL.md" \
-  '--claude-prompt "$CLAUDE_PROMPT" --codex-prompt "$CODEX_PROMPT"' \
-  "optimized startup still launches the same dual-model pair"
+  'REVIEWERS=$(node "$SKILL_DIR/scripts/reviewer-selection.mjs" --context "$CONTEXT_PATH")' \
+  "startup derives enabled reviewers from the fixed context"
+require_text "$SKILL_DIR/SKILL.md" \
+  'PRIMARY_ARGS+=("--$reviewer-prompt" "$REVIEW_PROMPT")' \
+  "startup passes each enabled reviewer its own generated prompt"
 require_text "$SKILL_DIR/SKILL.md" \
   '初回pairの外側実行枠は`1050000`ms' \
   "short startup contract preserves the canonical pair timeout"
@@ -175,8 +179,8 @@ require_text "$SKILL_DIR/SKILL.md" \
   "Phase 6のreport生成前" \
   "report contract is loaded before publication"
 require_text "$SKILL_DIR/references/host-adapters.md" \
-  "外部Claudeと外部Codexをホストによらず同時実行する" \
-  "both hosts use the same concurrent pair execution"
+  "両方有効なら外部Claudeと外部Codexを同時実行する" \
+  "both hosts keep concurrent pair execution when both reviewers are enabled"
 require_text "$SKILL_DIR/references/host-adapters.md" \
   'exit 0かつ`status=passed`' \
   "host contract fails closed before reviewer launch"
@@ -260,7 +264,7 @@ require_text "$SKILL_DIR/references/workflow.md" \
   '実行基盤エラーが残る場合を優先して`3`' \
   "workflow defines infrastructure result precedence"
 require_text "$SKILL_DIR/references/workflow.md" \
-  '両成功が`0`、片方の通常失敗が`20`、両方の通常失敗が`21`' \
+  '選択した全reviewerの成功が`0`、1者の通常失敗が`20`、2者の通常失敗が`21`' \
   "workflow defines pair result semantics"
 require_text "$SKILL_DIR/references/workflow.md" \
   "新規finding、重複、撤回、降格、昇格、据置、" \
@@ -340,7 +344,7 @@ require_text "$SKILL_DIR/references/workflow.md" \
   "1〜19roundで収束条件を満たさず中止した場合は完成reportをpublishせず" \
   "incomplete convergence cannot be published as a complete report"
 require_text "$SKILL_DIR/SKILL.md" \
-  "単独モデルで後続phase/roundへ進まず、完成reportを公開しない" \
+  "失敗した担当を選択から外して後続phase/roundへ進まず、完成reportを公開しない" \
   "retry exhaustion stops instead of degrading to one reviewer"
 require_text "$SKILL_DIR/SKILL.md" \
   "原因と具体的な解決手順を案内する" \
@@ -465,7 +469,7 @@ reject_text "$SCRIPTS/run-review-preflight.sh" \
   "preflight never launches an external reviewer"
 for file in \
   build-review-diff.mjs build-review-snapshot.mjs build-base-guidance.mjs \
-  snapshot-tooling.mjs resolve-reviewer-config.sh prepare-review-run.sh \
+  snapshot-tooling.mjs resolve-reviewer-config.sh reviewer-selection.mjs prepare-review-run.sh \
   run-review-preflight.sh verify-review-run.sh \
   launch-run-codex.sh verify-run-codex-launch.mjs \
   launch-run-reviewer.sh verify-run-reviewer-launch.mjs \
@@ -563,7 +567,16 @@ if [ "$(printf '%s' "$context" | jq -r .reviewerConfig.claude.model)" = "prepare
   [ "$(printf '%s' "$context" | jq -r .reviewerConfig.claude.effort)" = "prepare-claude-effort" ] &&
   [ "$(printf '%s' "$context" | jq -r .reviewerConfig.codex.model)" = "prepare-codex-model" ] &&
   [ "$(printf '%s' "$context" | jq -r .reviewerConfig.codex.reasoningEffort)" = "prepare-codex-effort" ] &&
-  [ "$(printf '%s' "$context" | jq -r '[.reviewerConfigSources[][]] | unique | join(",")')" = "config-file" ]; then
+  printf '%s' "$context" | jq -e '
+    [.reviewerConfigSources.claude.model, .reviewerConfigSources.claude.effort,
+     .reviewerConfigSources.codex.model, .reviewerConfigSources.codex.reasoningEffort]
+      | all(. == "config-file")
+  ' >/dev/null &&
+  printf '%s' "$context" | jq -e '
+    .reviewerConfig.claude.enabled == true and .reviewerConfig.codex.enabled == true and
+    .reviewerConfigSources.claude.enabled == "default" and
+    .reviewerConfigSources.codex.enabled == "default"
+  ' >/dev/null; then
   ok "noninteractive prepare fixes arbitrary config-file values and their source"
 else
   ng "noninteractive prepare fixes arbitrary config-file values and their source"

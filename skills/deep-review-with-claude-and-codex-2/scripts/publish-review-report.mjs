@@ -19,6 +19,7 @@ import { pathToFileURL } from "node:url";
 
 import { toBashAbsolutePath } from "./path-interop.mjs";
 import { validateReviewReport } from "./validate-review-report.mjs";
+import { getEnabledReviewers } from "./reviewer-selection.mjs";
 
 export { toBashAbsolutePath } from "./path-interop.mjs";
 
@@ -161,6 +162,7 @@ function loadRunContext(runDirectory, args, callerReportPath) {
   ) {
     fail("run context reviewStartedAtMs must be a positive safe integer");
   }
+  getEnabledReviewers(context);
   return context;
 }
 

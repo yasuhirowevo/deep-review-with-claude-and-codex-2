@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { createAdjudication } from "../scripts/review-adjudication.mjs";
+import { assertCanStartRound, firstConvergenceEndIndex, isStableRound } from "../scripts/review-convergence.mjs";
 import { createOutputEvidence } from "../scripts/review-output-evidence.mjs";
 import { toBashAbsolutePath } from "../scripts/path-interop.mjs";
 
@@ -217,6 +218,82 @@ try {
       after: [],
     },
   );
+
+  process.stdout.write("== AI04: selected reviewers retain adjudication and convergence guarantees ==\n");
+  for (const reviewer of ["claude", "codex"]) {
+    const disabled = reviewer === "claude" ? "codex" : "claude";
+    const pair = {
+      schema: "deep-review-pair/v6", reviewRunId,
+      expectedReviewers: [reviewer], phase: "convergence", round: 1,
+      complete: true, canonical: { [reviewer]: canonical[reviewer], [disabled]: null },
+    };
+    const previous = {
+      schema: "deep-review-adjudication/v1", reviewRunId,
+      phase: "primary", round: null,
+      inputs: { [reviewer]: {}, [disabled]: null },
+      after: { findings: [originalFinding] },
+    };
+    const draft = {
+      decisions: duplicateDecisions("F1").filter((decision) => decision.candidateId.startsWith(`${reviewer}-`)),
+      changes: [{ findingId: "F1", action: "unchanged", rationale: "still applies" }],
+      after: [originalFinding],
+    };
+    writeJson(pairStatusPath, pair);
+    writeJson(previousPath, previous);
+    try {
+      const result = runCase(`${reviewer}-only`, draft)();
+      if (result.inputs[disabled] === null && result.summary[`${disabled}New`] === null &&
+          result.summary[`${reviewer}New`] === 0 && isStableRound(result) &&
+          firstConvergenceEndIndex([result]) === -1 &&
+          firstConvergenceEndIndex([result, result]) === 1 &&
+          !isStableRound({ ...result, summary: { ...result.summary, reviewersSucceeded: false } }) &&
+          !isStableRound({ ...result, summary: { ...result.summary, [`${disabled}New`]: 0 } })) {
+        ok(`${reviewer}-only evidence converges after two stable rounds without disabled success counts`);
+      } else ng(`${reviewer}-only evidence converges after two stable rounds without disabled success counts`);
+      const phase4Directory = path.join(tempRoot, `${reviewer}-phase4`);
+      mkdirSync(path.join(phase4Directory, "round-1"), { recursive: true });
+      writeJson(path.join(phase4Directory, "round-1", "adjudication.json"), result);
+      assertCanStartRound({
+        phase4Directory, reviewRunId, nextRound: 2,
+        context: { reviewerConfig: { [reviewer]: { enabled: true }, [disabled]: { enabled: false } } },
+      });
+      try {
+        assertCanStartRound({ phase4Directory, reviewRunId, nextRound: 2, context: {} });
+        ng(`${reviewer}-only round startup rejects a different frozen selection`);
+      } catch (error) {
+        if (error.message === "convergence adjudication reviewer selection does not match the run") {
+          ok(`${reviewer}-only round startup rejects a different frozen selection`);
+        } else ng(`${reviewer}-only round startup selection`, error.message);
+      }
+      try {
+        firstConvergenceEndIndex([result, {
+          ...result,
+          inputs: { [reviewer]: null, [disabled]: {} },
+          summary: { ...result.summary, [`${reviewer}New`]: null, [`${disabled}New`]: 0 },
+        }]);
+        ng(`${reviewer}-only convergence rejects changed reviewers between rounds`);
+      } catch (error) {
+        if (error.message === "convergence adjudication reviewer selection does not match the run") {
+          ok(`${reviewer}-only convergence rejects changed reviewers between rounds`);
+        } else ng(`${reviewer}-only convergence selection`, error.message);
+      }
+    } catch (error) { ng(`${reviewer}-only adjudication`, error.message); }
+    expectFail(`${reviewer}-missing-decision`, `${reviewer}-only adjudication requires every candidate`,
+      "every canonical reviewer candidate must be adjudicated exactly once", { ...draft, decisions: [] });
+    writeJson(pairStatusPath, { ...pair, canonical: { ...pair.canonical, [disabled]: canonical[disabled] } });
+    expectFail(`${reviewer}-fabricated-disabled`, `${reviewer}-only rejects disabled canonical evidence`,
+      `${disabled} was not selected but has canonical output evidence`, draft);
+    writeJson(pairStatusPath, { ...pair, canonical: { ...pair.canonical, [reviewer]: null } });
+    expectFail(`${reviewer}-missing-enabled`, `${reviewer}-only missing canonical output is incomplete`,
+      `${reviewer} canonical output evidence is unavailable`, draft);
+    writeJson(pairStatusPath, pair);
+    writeJson(previousPath, { ...previous, inputs: { [reviewer]: null, [disabled]: {} } });
+    expectFail(`${reviewer}-selection-drift`, `${reviewer}-only cannot change selection mid-chain`,
+      "previous adjudication does not precede this pair status", draft);
+    writeJson(previousPath, previous);
+    writeJson(pairStatusPath, { ...pair, expectedReviewers: [], canonical: {} });
+    expectFail(`${reviewer}-no-selection`, "empty reviewer selection is invalid", "pair status reviewer selection is invalid", draft);
+  }
 } finally {
   rmSync(tempRoot, { recursive: true, force: true, maxRetries: 3 });
 }

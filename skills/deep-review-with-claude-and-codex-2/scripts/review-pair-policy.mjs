@@ -71,13 +71,16 @@ function runCli(argv) {
         ["--codex-exit-code", "codexExitCode"],
       ]),
     );
-    if (parsed.claudeExitCode === undefined || parsed.codexExitCode === undefined) {
+    const exitCodes = [parsed.claudeExitCode, parsed.codexExitCode].filter(
+      (value) => value !== undefined,
+    );
+    if (exitCodes.length === 0) {
       fail(
-        "usage: review-pair-policy.mjs exit-code --claude-exit-code <code> --codex-exit-code <code>",
+        "usage: review-pair-policy.mjs exit-code [--claude-exit-code <code>] [--codex-exit-code <code>] (at least one)",
       );
     }
     process.stdout.write(
-      `${reviewPairExitCode([parsed.claudeExitCode, parsed.codexExitCode])}\n`,
+      `${reviewPairExitCode(exitCodes)}\n`,
     );
     return;
   }

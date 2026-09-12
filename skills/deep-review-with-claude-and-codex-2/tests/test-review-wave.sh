@@ -38,6 +38,7 @@ for script in \
   review-wave-state.mjs review-convergence.mjs review-prompt-manifest.mjs \
   path-interop.mjs \
   review-resume-provenance.mjs review-pair-policy.mjs review-output-evidence.mjs \
+  reviewer-selection.mjs \
   run-output-evidence-bounded.mjs verify-claude-review-output.mjs; do
   cp "$SOURCE_SKILL/scripts/$script" "$T/tooling/scripts/$script"
 done
@@ -2974,6 +2975,185 @@ wait "$WAVE_PID"
 check "$?" "0" "recovered infrastructure wave completes normally"
 check "$(inspect_waves "$CONTEXT_INFRA" "$ARTIFACT_INFRA")" "[1,2]" \
   "wave validation accepts infrastructure recovery evidence"
+
+write_selected_adjudication() {
+  local artifact="$1" run_id="$2" round="$3" stable="$4" selected="$5"
+  local adjudication="$artifact/phase4/round-$round/adjudication.json"
+  write_adjudication "$artifact" "$run_id" "$round" "$stable"
+  jq --arg selected "$selected" --argjson stable "$stable" \
+    --slurpfile pair "$artifact/phase4/round-$round/status.json" \
+    '.expectedReviewers = [$selected] |
+     .inputs = {claude:null,codex:null} |
+     .inputs[$selected] = $pair[0].canonical[$selected].evidence |
+     .summary.claudeNew = (if $selected == "claude" then (if $stable then 0 else 1 end) else null end) |
+     .summary.codexNew = (if $selected == "codex" then (if $stable then 0 else 1 end) else null end)' \
+    "$adjudication" > "$adjudication.new"
+  mv "$adjudication.new" "$adjudication"
+}
+
+test_selected_wave() {
+  local selected="$1" disabled=codex
+  local artifact="$T/artifact-selected-$selected"
+  local context="$T/context-selected-$selected.json"
+  local run_id="wave-selected-$selected" state="$T/state-selected-$selected"
+  local wave_status wave_pid round
+  if [ "$selected" = codex ]; then disabled=claude; fi
+  mkdir "$state"
+  write_context "$artifact" "$context" "$run_id"
+  jq --arg selected "$selected" --arg disabled "$disabled" \
+    '.reviewerConfig = {($selected):{enabled:true},($disabled):{enabled:false}} |
+     if $selected == "claude" then .codexLauncherPath = "/missing-disabled-codex" else . end' \
+    "$context" > "$context.new"
+  mv "$context.new" "$context"
+  for round in 1 2 3 4; do
+    write_prompt "$context" "$T/selected-$selected-round-$round.md" "$selected" "$round"
+  done
+
+  bash "$T/tooling/scripts/run-review-wave.sh" \
+    --context "$context" --first-round 1 \
+    "--$selected-lead-prompt" "$T/selected-$selected-round-1.md" \
+    > "$T/wave-selected-$selected-missing-prompt.out" 2>&1
+  check "$?" "2" "$selected-only wave requires its speculative prompt"
+
+  WAVE_TEST_STATE="$state" WAVE_TEST_CLAUDE_FAIL_ROUND=1 WAVE_TEST_CODEX_FAIL_ROUND=1 \
+  WAVE_TEST_DELAY_1=0.1 WAVE_TEST_DELAY_2=0.1 \
+    bash "$T/tooling/scripts/run-review-wave.sh" \
+    --context "$context" --first-round 1 \
+    "--$selected-lead-prompt" "$T/selected-$selected-round-1.md" \
+    "--$selected-speculative-prompt" "$T/selected-$selected-round-2.md" \
+    "--$disabled-lead-prompt" "$T/missing-disabled-lead" \
+    "--$disabled-speculative-prompt" "$T/missing-disabled-speculative" \
+    > "$T/wave-selected-$selected-first.out" 2>&1 &
+  wave_pid=$!
+  wave_status="$artifact/phase4/waves/wave-1-2/status.json"
+  if ! wait_for_json "$wave_status" '.lead.process.finishedAt != null'; then
+    ng "$selected-only wave finishes its first lead attempt"
+    cat "$T/wave-selected-$selected-first.out"
+    kill -TERM "$wave_pid" 2>/dev/null || true
+    wait "$wave_pid" 2>/dev/null || true
+    return
+  fi
+  check "$(jq -r .lead.process.exitCode "$wave_status")" "20" \
+    "$selected-only wave preserves its lead failure"
+  bash "$T/tooling/scripts/control-review-wave.sh" \
+    --context "$context" --wave-status "$wave_status" --action prior-failure \
+    > "$T/wave-selected-$selected-early-failure.out" 2>&1
+  check "$?" "1" "$selected-only wave retains its required retry before prior-failure"
+  WAVE_TEST_STATE="$state" \
+    bash "$T/tooling/scripts/run-review-pair.sh" \
+    --context "$context" --phase convergence --round 1 --attempt 2 \
+    "--$selected-prompt" "$T/selected-$selected-round-1.md" \
+    --wave-status "$wave_status" --wave-role lead \
+    > "$T/wave-selected-$selected-retry.out" 2>&1
+  check "$?" "0" "$selected-only lead retry succeeds with omitted reviewer selection"
+  write_selected_adjudication "$artifact" "$run_id" 1 false "$selected"
+  bash "$T/tooling/scripts/control-review-wave.sh" \
+    --context "$context" --wave-status "$wave_status" --action promote \
+    > "$T/wave-selected-$selected-promote.out" 2>&1
+  check "$?" "0" "$selected-only successor is promoted after lead adjudication"
+  wait "$wave_pid"
+  check "$?" "0" "$selected-only recovered wave completes"
+  check "$(inspect_waves "$context" "$artifact")" "[1,2]" \
+    "$selected-only wave promotion retains verifiable execution evidence"
+  if jq -e --arg selected "$selected" --arg disabled "$disabled" \
+    '.expectedReviewers == [$selected] and
+     (.lead.prompts | keys) == [$selected] and
+     (.speculative.prompts | keys) == [$selected] and
+     all(.lead.executionEvidence.attempts[]; has($disabled) | not)' \
+    "$wave_status" >/dev/null &&
+    [ ! -e "$state/round-1-$disabled.started" ] &&
+    [ ! -e "$state/round-2-$disabled.started" ]; then
+    ok "$selected-only wave records only selected prompts and execution evidence"
+  else
+    ng "$selected-only wave records only selected prompts and execution evidence"
+  fi
+
+  write_selected_adjudication "$artifact" "$run_id" 2 true "$selected"
+  for round in 1 2; do
+    cp "$artifact/phase4/round-$round/adjudication.json" \
+      "$T/selected-$selected-round-$round-adjudication.original"
+    jq --arg selected "$selected" --arg disabled "$disabled" \
+      '.expectedReviewers = [$disabled] |
+       .inputs[$disabled] = .inputs[$selected] | .inputs[$selected] = null |
+       .summary[$disabled + "New"] = .summary[$selected + "New"] |
+       .summary[$selected + "New"] = null' \
+      "$artifact/phase4/round-$round/adjudication.json" \
+      > "$artifact/phase4/round-$round/adjudication.json.new"
+    mv "$artifact/phase4/round-$round/adjudication.json.new" \
+      "$artifact/phase4/round-$round/adjudication.json"
+  done
+  bash "$T/tooling/scripts/run-review-wave.sh" \
+    --context "$context" --first-round 3 \
+    "--$selected-lead-prompt" "$T/selected-$selected-round-3.md" \
+    "--$selected-speculative-prompt" "$T/selected-$selected-round-4.md" \
+    > "$T/wave-selected-$selected-changed-adjudications.out" 2>&1
+  check "$?" "2" "$selected-only next wave rejects a changed prior reviewer set"
+  if [ ! -e "$artifact/phase4/waves/wave-3-4" ]; then
+    ok "$selected-only selection mismatch cannot reserve a successor wave"
+  else
+    ng "$selected-only selection mismatch cannot reserve a successor wave"
+  fi
+  for round in 1 2; do
+    cp "$T/selected-$selected-round-$round-adjudication.original" \
+      "$artifact/phase4/round-$round/adjudication.json"
+  done
+  WAVE_TEST_STATE="$state" WAVE_TEST_DELAY_3=0.1 WAVE_TEST_DELAY_4=10 \
+    bash "$T/tooling/scripts/run-review-wave.sh" \
+    --context "$context" --first-round 3 \
+    "--$selected-lead-prompt" "$T/selected-$selected-round-3.md" \
+    "--$selected-speculative-prompt" "$T/selected-$selected-round-4.md" \
+    > "$T/wave-selected-$selected-converge.out" 2>&1 &
+  wave_pid=$!
+  wave_status="$artifact/phase4/waves/wave-3-4/status.json"
+  if ! wait_for_json "$wave_status" '.lead.process.finishedAt != null'; then
+    ng "$selected-only next wave starts after one stable round"
+    cat "$T/wave-selected-$selected-converge.out"
+    kill -TERM "$wave_pid" 2>/dev/null || true
+    wait "$wave_pid" 2>/dev/null || true
+    return
+  fi
+  write_selected_adjudication "$artifact" "$run_id" 3 true "$selected"
+  bash "$T/tooling/scripts/control-review-wave.sh" \
+    --context "$context" --wave-status "$wave_status" --action converge \
+    > "$T/wave-selected-$selected-control-converge.out" 2>&1
+  check "$?" "0" "$selected-only wave accepts two consecutive stable rounds"
+  wait "$wave_pid"
+  check "$?" "0" "$selected-only convergence cancels speculative work cleanly"
+  check "$(inspect_waves "$context" "$artifact")" "[1,2,3]" \
+    "$selected-only cancelled successor remains outside canonical rounds"
+  if jq -e '.speculative.state == "cancelled-after-convergence" and
+    .speculative.executionEvidence != null' "$wave_status" >/dev/null &&
+    [ ! -e "$artifact/phase4/round-4" ] &&
+    [ ! -e "$state/round-3-$disabled.started" ] &&
+    [ ! -e "$state/round-4-$disabled.started" ]; then
+    ok "$selected-only convergence retains cancellation evidence without disabled output"
+  else
+    ng "$selected-only convergence retains cancellation evidence without disabled output"
+  fi
+  bash "$T/tooling/scripts/run-review-wave.sh" \
+    --context "$context" --first-round 4 \
+    "--$selected-lead-prompt" "$T/selected-$selected-round-4.md" \
+    "--$selected-speculative-prompt" "$T/not-needed-after-convergence" \
+    > "$T/wave-selected-$selected-after-convergence.out" 2>&1
+  check "$?" "2" "$selected-only run cannot start another wave after convergence"
+  if rg -q 'already converged at round 3' "$T/wave-selected-$selected-after-convergence.out"; then
+    ok "$selected-only stop is based on the unchanged two-round convergence rule"
+  else
+    ng "$selected-only stop is based on the unchanged two-round convergence rule"
+  fi
+  cp "$wave_status" "$T/wave-selected-$selected-status.original"
+  jq '.expectedReviewers = ["claude","codex"]' "$wave_status" > "$wave_status.new"
+  mv "$wave_status.new" "$wave_status"
+  node "$T/tooling/scripts/review-wave-state.mjs" control-state \
+    --context "$context" --status "$wave_status" \
+    > "$T/wave-selected-$selected-tampered-selection.out" 2>&1
+  check "$?" "1" "$selected-only wave rejects a changed reviewer selection"
+  cp "$T/wave-selected-$selected-status.original" "$wave_status"
+}
+
+echo "== W10: configured single reviewers preserve wave promotion and convergence =="
+test_selected_wave claude
+test_selected_wave codex
 
 printf '\nSummary: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
